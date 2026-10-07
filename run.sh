@@ -39,7 +39,15 @@ SQL
   echo "reset: $DB_NAME seeded"
 }
 
+# Foreground for now; stage 4+ turns this into a health-checked background start.
+cmd_toolbox() {
+  [[ -n "${TOOLBOX_DB_PASSWORD:-}" ]] || die "TOOLBOX_DB_PASSWORD is not set; add it to .env"
+  exec npx -y @toolbox-sdk/server --config mcp_toolbox/tools.yaml \
+    --enable-api --address 127.0.0.1 --port 5000
+}
+
 case "${1:-}" in
   reset) cmd_reset ;;
-  *) echo "usage: $0 reset" >&2; exit 2 ;;
+  toolbox) cmd_toolbox ;;
+  *) echo "usage: $0 reset|toolbox" >&2; exit 2 ;;
 esac

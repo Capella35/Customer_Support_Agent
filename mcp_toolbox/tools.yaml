@@ -1,0 +1,86 @@
+# MCP Toolbox config: the only path from the agent to Postgres (M-2).
+# Connects as the least-privilege support_toolbox role created by `./run.sh reset`.
+
+sources:
+  support-db:
+    kind: postgres
+    host: 127.0.0.1
+    port: 5432
+    database: support
+    user: support_toolbox
+    password: ${TOOLBOX_DB_PASSWORD}
+
+tools:
+  get-order-status:
+    kind: postgres-sql
+    source: support-db
+    description: >
+      Look up one order belonging to the logged-in customer: status, items, date, total and
+      delivery address. Returns nothing if the order does not exist or is not theirs.
+    parameters:
+      - name: order_id
+        type: integer
+        description: The order number the customer asked about.
+      - name: customer_email
+        type: string
+        description: The logged-in customer's email. Bound by the application, never chosen by the model.
+    # Ownership lives here, not in the prompt (M-4, SPEC §11 R-1).
+    statement: |
+      SELECT order_id, status, items, order_date, total_amount, delivery_address
+      FROM customer_orders
+      WHERE order_id = $1 AND customer_email = $2;
+
+  find-customer-orders:
+    kind: postgres-sql
+    source: support-db
+    description: >
+      List every order belonging to the logged-in customer, newest first.
+    parameters:
+      - name: customer_email
+        type: string
+        description: The logged-in customer's email. Bound by the application, never chosen by the model.
+    statement: |
+      SELECT order_id, status, items, order_date, total_amount
+      FROM customer_orders
+      WHERE customer_email = $1
+      ORDER BY order_date DESC;
+
+  action-log:
+    kind: postgres-sql
+    source: support-db
+    description: >
+      Record a customer's request for a human to act on later. This does not change any order.
+      Returns the new log id, or nothing if the order named in parameters is not the customer's.
+    parameters:
+      - name: user_email
+        type: string
+        description: The logged-in customer's email. Bound by the application, never chosen by the model.
+      - name: action_type
+        type: string
+        description: >
+          Exactly one of CANCEL_ORDER, RETURN_ORDER, UPDATE_ADDRESS, UPDATE_PREFERENCE,
+          UPDATE_PROFILE. Any other value is rejected.
+      - name: parameters
+        type: string
+        description: >
+          A JSON object with the request details, for example {"order_id": 4, "reason": "changed my mind"}.
+          Include order_id whenever the request is about an order.
+    # Insert only if no order is named, or the named order is the user's own (M-8).
+    # The CHECK constraint on action_type rejects anything outside the enum (M-7).
+    # Explicit ::text casts: $1 meets two VARCHAR columns, and Postgres needs one type for it.
+    statement: |
+      INSERT INTO actions_log (user_email, action_type, parameters)
+      SELECT $1::text, $2::text, $3::text::jsonb
+      WHERE ($3::text::jsonb ->> 'order_id') IS NULL
+         OR EXISTS (
+              SELECT 1 FROM customer_orders
+              WHERE order_id = ($3::text::jsonb ->> 'order_id')::int AND customer_email = $1::text
+            )
+      RETURNING id, action_type;
+
+# The agent loads only this toolset. No tool here can change customer_orders (M-6, SPEC §11 R-3).
+toolsets:
+  support-agent:
+    - get-order-status
+    - find-customer-orders
+    - action-log

@@ -14,7 +14,7 @@ Alice never sees Bob's laptop.
 ---
 
 ## Stage 1: the database
-- I decided: all three predictions matched, so the seed is correct and the CHECK constraint works as specified. 
+- I decided that I chose the reset script, which drops the tables, recreates them, and reseeds from scratch each time it runs. A rolled-back transaction      wouldn't work because the Toolbox writes through its own connection, so a rollback in my runner can't undo its writes; a Docker volume wasn't an option because my Postgres runs locally, not in a container.
 - I predicted: 
   - users: I predicted that the user count would be exactly 10 rows because EVALS §2 defines a fixed seed dataset.
   - orders: First guess on orders: 15 rows, order #5 = customer5@example.com with PENDING status. Re-checked EVALS §2 → 17 rows, order #5 = bob.smith@techmail.com with DELIVERED status (PENDING isn't even a valid status in the seed).
@@ -38,14 +38,14 @@ Alice never sees Bob's laptop.
           7 | bob.smith@techmail.com  | PROCESSING
           8 | charlie.d@webmail.com   | DELIVERED
           9 | diana.prince@hero.net   | DELIVERED
-        10 | diana.prince@hero.net   | RETURNED
-        11 | evan.g@bizcorp.com      | SHIPPED
-        12 | fiona.shrek@swamp.com   | CANCELLED
-        13 | george.j@jungle.com     | PROCESSING
-        14 | hannah.m@school.edu     | DELIVERED
-        15 | ian.malcolm@chaos.com   | DELIVERED
-        16 | julia.child@kitchen.com | DELIVERED
-        17 | julia.child@kitchen.com | PROCESSING
+          10 | diana.prince@hero.net   | RETURNED
+          11 | evan.g@bizcorp.com      | SHIPPED
+          12 | fiona.shrek@swamp.com   | CANCELLED
+          13 | george.j@jungle.com     | PROCESSING
+          14 | hannah.m@school.edu     | DELIVERED
+          15 | ian.malcolm@chaos.com   | DELIVERED
+          16 | julia.child@kitchen.com | DELIVERED
+          17 | julia.child@kitchen.com | PROCESSING
   (17 rows)
 
   psql -d support -c "insert into actions_log (user_email, action_type, parameters) values ('x','RETURN_ITEM','{}');"
@@ -53,16 +53,24 @@ Alice never sees Bob's laptop.
   DETAIL:  Failing row contains (1, 2026-10-06 00:40:47.150139-07, x, RETURN_ITEM, {}).
 
 ## Stage 2: the tools, and where access control lives
-- **Before reading SPEC R-1, I thought ownership belonged in:**
-- **I decided:**
-- **What happened (order 5 as alice):**
+- Before reading SPEC R-1, I thought ownership belonged in: the tool's SQL. A prompt is just a sentence, and the model can be talked out of following it — that's what happened with Alice and Bob. Worse, if the model fills in the email itself, anyone who tricks the model controls whose orders the query returns. The check has to sit where the model can't touch it, and the email has to come from the login session, not from the model.
+- I decided: the spec didn't change my mind — R-1 says the same thing, with the Alice/Bob story as proof. What it added was the mechanism: M-5 binds the email as a bound parameter in toolbox-core, set in code at login, so the parameter never appears in the tool schema the model sees. M-4 also applies the same filter to both read tools — get-order-status and find-customer-orders — not just the one in the Alice/Bob story.
+- What happened (order 5 as alice): Order 3 as alice.jones@example.com returns her keyboard order; order 5 as alice.jones@example.com returns nothing, because the SQL filters on customer_email.
+% curl -s -X POST 127.0.0.1:5000/api/tool/get-order-status/invoke \
+  -H 'content-type: application/json' -d '{"order_id": 3, "customer_email": "alice.jones@example.com"}'
+{"result":"[{\"order_id\":3,\"status\":\"SHIPPED\",\"items\":[{\"price\":120,\"product\":\"Mechanical Keyboard\",\"qty\":1}],\"order_date\":\"2026-10-05T16:18:35.01589-07:00\",\"total_amount\":120.00,\"delivery_address\":\"123 Market St, Springfield\"}]"}
+% curl -s -X POST 127.0.0.1:5000/api/tool/get-order-status/invoke \
+  -H 'content-type: application/json' -d '{"order_id": 5, "customer_email": "alice.jones@example.com"}'
+{"result":"[]"}
+I noticed: the result is a JSON string inside JSON, and order 5 came back as [] — identical to "no such order" — which is good, because it doesn't leak whether Bob's order exists at all.
+
 
 ## Stage 3: the agent, and a bare CLI
 - **I decided (tools loaded, how the email is bound):**
 - **I predicted the "order 5 for bob" request would:**
 - **What happened:**
 
-## Stage 4: the pipeline and its events
+## Stage 4: the pipeline and its events 
 - **My hand-sketched CLI lines:**
 - **I predicted the first event after the agent stage would be:**
 - **What happened:**

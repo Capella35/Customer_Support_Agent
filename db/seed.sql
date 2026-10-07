@@ -71,4 +71,5 @@ CREATE TABLE actions_log (
 GRANT USAGE ON SCHEMA public TO support_toolbox;
 GRANT SELECT ON users, customer_orders TO support_toolbox;
 GRANT INSERT ON actions_log TO support_toolbox;
+GRANT SELECT (id, action_type) ON actions_log TO support_toolbox;  -- for action-log's RETURNING only
 GRANT USAGE ON SEQUENCE actions_log_id_seq TO support_toolbox;
