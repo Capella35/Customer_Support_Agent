@@ -46,8 +46,15 @@ cmd_toolbox() {
     --enable-api --address 127.0.0.1 --port 5000
 }
 
+# Stage 3: the bare CLI. Needs the Toolbox running (./run.sh toolbox in another terminal).
+cmd_cli() {
+  PYTHON="${PYTHON:-$HOME/opt/anaconda3/envs/support/bin/python}"
+  exec "$PYTHON" -m support.cli "$@"
+}
+
 case "${1:-}" in
   reset) cmd_reset ;;
   toolbox) cmd_toolbox ;;
-  *) echo "usage: $0 reset|toolbox" >&2; exit 2 ;;
+  cli) shift; cmd_cli "$@" ;;
+  *) echo "usage: $0 reset|toolbox|cli" >&2; exit 2 ;;
 esac

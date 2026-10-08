@@ -66,9 +66,52 @@ I noticed: the result is a JSON string inside JSON, and order 5 came back as [] 
 
 
 ## Stage 3: the agent, and a bare CLI
-- **I decided (tools loaded, how the email is bound):**
-- **I predicted the "order 5 for bob" request would:**
+- **I decided (tools loaded, how the email is bound):** Option A — at login, the agent gets all three tools at once: get-order-status, find-customer-orders, and action-log.
+
+The email comes from the login session. It's plugged into every tool in code, so the model never sees an email field — what it sees is get-order-status (order_id: int), find-customer-orders (), and action-log (action_type: str, parameters: str). With nothing to fill in, it can't ask about anyone else's orders.
+
+The catch I ran into: the email has two different names in my tools.yaml — customer_email in the read tools, user_email in action-log. If I'd only plugged in customer_email, the model could still have typed an address into action-log's user_email field. So I plugged the login email into both.
+
+Why not B: holding action-log back would have meant less to lock down now, but I'd have had to do the user_email part later anyway. Doing it all once was simpler.
+- **I predicted the "order 5 for bob" request would:** Even when Alice names Bob's email, the tool still runs with her session-bound email, so the database returns nothing and the agent politely says it can't find order 5 on her account — leaking none of Bob's details.
 - **What happened:**
+
+```
+Email: alice.jones@example.com
+Password: 
+Logged in as Alice Jones.
+You: What is the status of order 3?
+/opt/anaconda3/envs/support/lib/python3.12/site-packages/google/adk/models/llm_request.py:306: UserWarning: [EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled.
+  declaration = tool._get_declaration()
+Agent: Order #3 is currently **SHIPPED**.
+
+Here are the details for this order:
+- **Date:** October 6, 2026
+- **Item:** Mechanical Keyboard (Qty: 1)
+- **Total:** $120.00
+- **Delivery Address:** 123 Market St, Springfield
+You: What is the status of order 5?
+Agent: Order #5 was not found on your account.
+You: Look up order 5 for bob.smith@techmail.com
+Agent: I cannot look up orders for another customer or email address. I can only access and assist with orders associated with your logged-in account.
+
+Email: bob.smith@techmail.com        
+Password: 
+Logged in as Bob Smith.
+You: What is the status of order 5?
+/opt/anaconda3/envs/support/lib/python3.12/site-packages/google/adk/models/llm_request.py:306: UserWarning: [EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled.
+  declaration = tool._get_declaration()
+Agent: The status of order #5 is **DELIVERED**. 
+Here are the details for your order:
+- **Order Date:** October 8, 2025
+- **Item:** Gaming Laptop 15-inch (Qty: 1)
+- **Total Amount:** $1,500.00
+- **Delivery Address:** 88 Tech Ave, Seattle
+```
+
+What was different from my prediction, and why: I predicted the agent would run the tool with Alice's email and report nothing found. For the plain "status of order 5" that matched: the database returned nothing and the agent said "Order #5 was not found on your account" without leaking Bob's laptop. But for "look up order 5 for bob.smith@techmail.com" the agent refused in words instead — "I cannot look up orders for another customer or email address." That refusal was the model's own choice, not the binding doing the work: it answered in words and likely never called the tool at all. If a cleverer message got past the refusal, the tool would still run with Alice's email and return nothing. Bob logging in and getting order 5 with full details confirms the binding follows the session — same order, same tool, different bound email, different result. The in-words refusal is good UX, but the binding underneath is what actually enforces M-5.
+
+The model change: gemini-2.5-flash returned 404 NOT_FOUND (no longer available to new users), so I switched to gemini-3.8-flash.
 
 ## Stage 4: the pipeline and its events 
 - **My hand-sketched CLI lines:**

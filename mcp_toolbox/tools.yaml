@@ -78,9 +78,31 @@ tools:
             )
       RETURNING id, action_type;
 
+  # Used by the login step only, never by the agent (no SQL in Python, M-2).
+  # Plain-text passwords are the demo seed (SPEC §3), not a pattern to copy.
+  verify-login:
+    kind: postgres-sql
+    source: support-db
+    description: Check a customer's email and password. Returns their profile, or nothing.
+    parameters:
+      - name: email
+        type: string
+        description: The email the customer typed.
+      - name: password
+        type: string
+        description: The password the customer typed.
+    statement: |
+      SELECT email, full_name, is_premium_customer
+      FROM users
+      WHERE email = $1 AND password = $2;
+
 # The agent loads only this toolset. No tool here can change customer_orders (M-6, SPEC §11 R-3).
 toolsets:
   support-agent:
     - get-order-status
     - find-customer-orders
     - action-log
+
+# Loaded by the CLI and web login before any agent exists. The agent never loads it.
+  auth:
+    - verify-login
