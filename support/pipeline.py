@@ -1,7 +1,8 @@
 """One turn, as a stream of SPEC §7.1 events (P-1). The CLI and the web server only render them.
 
-Stage 4 runs only the agent stage: trace (placeholder id), stage/step agent, llm, tool_call,
-tool_result, final. The guards, recall, mask and save slot in around it in later stages (P-2).
+Stage 4 runs only the agent stage: trace, stage/step agent, llm, tool_call, tool_result, final.
+The guards, recall, mask and save slot in around it in later stages (P-2). Since Stage 5 the
+whole turn runs inside one agent.turn span, so ADK's invoke_agent is its child (SPEC §10).
 """
 import json
 import time
@@ -12,7 +13,10 @@ from pathlib import Path
 import yaml
 from google.adk.runners import Runner
 from google.genai import types
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
+from support import telemetry
 from support.agent import MODEL
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,7 +67,24 @@ def _unwrap(response: dict | None) -> tuple[bool, list | str]:
 
 async def run_turn(runner: Runner, session_id: str, user: str, message: str) -> AsyncIterator[dict]:
     turn_id = f"turn_{uuid.uuid4().hex}"
-    trace_id = "0" * 32  # placeholder until Stage 5 opens a real trace
+    tracer = trace.get_tracer("support.pipeline")
+    # Full message and reply go on the span: the student's Stage 5 decision (BUILD_LOG).
+    with tracer.start_as_current_span("agent.turn", attributes={
+        "openinference.span.kind": "CHAIN", "input.value": message,
+        "user.id": user, "session.id": session_id, "turn_id": turn_id,
+    }) as span:
+        trace_id = format(span.get_span_context().trace_id, "032x")
+        async for event in _turn(runner, session_id, user, message, turn_id, trace_id):
+            if event["type"] == "final":
+                span.set_attribute("output.value", event["response"])
+            elif event["type"] == "error":
+                span.set_status(Status(StatusCode.ERROR, event["error"]))
+            yield event
+    telemetry.flush()
+
+
+async def _turn(runner: Runner, session_id: str, user: str, message: str,
+                turn_id: str, trace_id: str) -> AsyncIterator[dict]:
     started = time.monotonic()
     log = {
         "turn_id": turn_id, "trace_id": trace_id, "user": user, "message": message,
@@ -84,7 +105,8 @@ async def run_turn(runner: Runner, session_id: str, user: str, message: str) -> 
         (RUNS_DIR / f"{turn_id}.json").write_text(json.dumps(log, indent=2))
         return terminal
 
-    yield {"type": "trace", "turn_id": turn_id, "trace_id": trace_id, "url": None}
+    yield {"type": "trace", "turn_id": turn_id, "trace_id": trace_id,
+           "url": telemetry.trace_url(trace_id)}
 
     yield {"type": "stage", "key": "agent", "label": "Support agent (ADK)"}
     agent_started = last_event = time.monotonic()

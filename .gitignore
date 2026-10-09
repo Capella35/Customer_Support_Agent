@@ -2,3 +2,4 @@
 runs/
 reports/
 __pycache__/
+.phoenix/

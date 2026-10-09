@@ -178,8 +178,20 @@ On the model: gemini-3.8-flash started throwing 503s — one turn spun for 119 s
 ```
 ## Stage 5: one trace per turn
 - **I decided (what goes in span attributes, who can see Phoenix):**
-- **Trace id:**
+Option A — the spans keep the full text: what the customer wrote, what the agent replied, the tool arguments and results. Basically what Phoenix and the Gemini instrumentation grab by default. I went with that because debugging blind is miserable — when a turn breaks, reading what was actually said tells me in minutes what reproducing it might never. I'm not pretending there's no cost: every address and order detail now sits in Phoenix's storage. Phoenix is localhost-only (:6006) with no login, so anyone with access to the machine can open it — same as the State section already says.
+- **Trace id:** 16fe488959c65f8fbd11c887827a7bba
 - **One thing the trace showed that the reply didn't:**
+The turn took 27.2 s, and 22.9 s of it was the first model call while the database call took 20 ms. The latency is all model, not data.
+
+Comparing PHOENIX results to the SPEC §10 drawing, here are the three differences:
+
+There's an extra invocation span. The drawing goes agent.turn → invoke_agent directly. Mine has agent.turn (27.2s) → invocation (27s) → invoke_agent support_agent (26.9s) — a wrapper span the drawing doesn't show, likely from the Runner's session handling.
+
+execute_tool is a sibling of call_llm, not its child. The drawing nests execute_tool under the first call_llm. In my trace, execute_tool find-customer-orders (20ms) sits directly under invoke_agent, between the two call_llm spans.
+
+call_llm expands into three spans, not one. The drawing shows a bare call_llm. Mine shows call_llm → generate_content gemini-3.5-flash → AsyncGenerateContent — the instrumentor's own nesting inside each model call.
+
+(The missing sanitize/judge/guardrail/recall/mask/save spans aren't a difference — those arrive in Stages 6–8, as expected.)After the Phoenix was stopped and restarted, the previous trace was still there.
 
 ## Stage 6: Sanitizer and Security Judge
 - **I decided (who may block, which A2A method):**

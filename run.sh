@@ -46,6 +46,15 @@ cmd_toolbox() {
     --enable-api --address 127.0.0.1 --port 5000
 }
 
+# Phoenix in its own process and its own conda env (O-1): its packages need a newer
+# OpenTelemetry than google-adk allows. SQLite under .phoenix/ keeps traces across restarts
+# (R-10); 127.0.0.1 keeps the UI, which has no login, off the network.
+cmd_phoenix() {
+  PHOENIX_PY="${PHOENIX_PY:-$HOME/opt/anaconda3/envs/phoenix/bin}"
+  PHOENIX_WORKING_DIR="$ROOT/.phoenix" PHOENIX_HOST=127.0.0.1 PHOENIX_PORT=6006 \
+    exec "$PHOENIX_PY/phoenix" serve
+}
+
 # Stage 3: the bare CLI. Needs the Toolbox running (./run.sh toolbox in another terminal).
 cmd_cli() {
   PYTHON="${PYTHON:-$HOME/opt/anaconda3/envs/support/bin/python}"
@@ -55,6 +64,7 @@ cmd_cli() {
 case "${1:-}" in
   reset) cmd_reset ;;
   toolbox) cmd_toolbox ;;
+  phoenix) cmd_phoenix ;;
   cli) shift; cmd_cli "$@" ;;
-  *) echo "usage: $0 reset|toolbox|cli" >&2; exit 2 ;;
+  *) echo "usage: $0 reset|toolbox|phoenix|cli" >&2; exit 2 ;;
 esac

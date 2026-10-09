@@ -19,6 +19,7 @@ import warnings
 from dotenv import load_dotenv
 from toolbox_core import ToolboxClient
 
+from support import telemetry
 from support.agent import TOOLBOX_URL, build_runner, login
 from support.pipeline import run_turn
 
@@ -94,6 +95,12 @@ async def main() -> None:
             f"The MCP Toolbox is not running at {TOOLBOX_URL}.\n"
             "Start it in another terminal with: ./run.sh toolbox"
         )
+    if not telemetry.phoenix_is_up():
+        sys.exit(
+            f"Phoenix is not running at {telemetry.PHOENIX_URL}.\n"
+            "Start it in another terminal with: ./run.sh phoenix"
+        )
+    telemetry.setup()  # before any agent is built, so ADK's spans join the turn's trace
     interactive = sys.stdin.isatty()
     async with ToolboxClient(TOOLBOX_URL) as client:
         email = args.user or read_line("Email: ", True)
