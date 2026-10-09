@@ -21,6 +21,7 @@ from toolbox_core import ToolboxClient
 
 from support import telemetry
 from support.agent import TOOLBOX_URL, build_runner, login
+from support.judge_client import JUDGE_URL, judge_is_up
 from support.pipeline import run_turn
 
 
@@ -99,6 +100,11 @@ async def main() -> None:
         sys.exit(
             f"Phoenix is not running at {telemetry.PHOENIX_URL}.\n"
             "Start it in another terminal with: ./run.sh phoenix"
+        )
+    if not judge_is_up():
+        sys.exit(
+            f"The Security Judge is not running at {JUDGE_URL}.\n"
+            "Start it in another terminal with: ./run.sh judge"
         )
     telemetry.setup()  # before any agent is built, so ADK's spans join the turn's trace
     interactive = sys.stdin.isatty()

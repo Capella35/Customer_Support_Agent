@@ -1,5 +1,6 @@
 .env
-runs/
+runs/*
+!runs/failing/
 reports/
 __pycache__/
 .phoenix/

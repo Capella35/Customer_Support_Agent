@@ -55,6 +55,12 @@ cmd_phoenix() {
     exec "$PHOENIX_PY/phoenix" serve
 }
 
+# Stage 6: the Security Judge, its own process on :10002 (J-1).
+cmd_judge() {
+  PYTHON="${PYTHON:-$HOME/opt/anaconda3/envs/support/bin/python}"
+  exec "$PYTHON" -m guards.judge
+}
+
 # Stage 3: the bare CLI. Needs the Toolbox running (./run.sh toolbox in another terminal).
 cmd_cli() {
   PYTHON="${PYTHON:-$HOME/opt/anaconda3/envs/support/bin/python}"
@@ -65,6 +71,7 @@ case "${1:-}" in
   reset) cmd_reset ;;
   toolbox) cmd_toolbox ;;
   phoenix) cmd_phoenix ;;
+  judge) cmd_judge ;;
   cli) shift; cmd_cli "$@" ;;
-  *) echo "usage: $0 reset|toolbox|phoenix|cli" >&2; exit 2 ;;
+  *) echo "usage: $0 reset|toolbox|phoenix|judge|cli" >&2; exit 2 ;;
 esac

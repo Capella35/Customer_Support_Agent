@@ -1,8 +1,9 @@
 """One turn, as a stream of SPEC §7.1 events (P-1). The CLI and the web server only render them.
 
-Stage 4 runs only the agent stage: trace, stage/step agent, llm, tool_call, tool_result, final.
-The guards, recall, mask and save slot in around it in later stages (P-2). Since Stage 5 the
-whole turn runs inside one agent.turn span, so ADK's invoke_agent is its child (SPEC §10).
+Steps so far, in P-2 order: sanitize -> judge -> agent. Guardrail, recall, mask and save slot
+in at their places in later stages. A block ends the turn at once (P-3); a guard that fails
+ends it with an error naming the step, never with an allow (P-4). The whole turn runs inside
+one agent.turn span, so every step's span and ADK's invoke_agent are its children (SPEC §10).
 """
 import json
 import time
@@ -16,11 +17,14 @@ from google.genai import types
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
+from guards.sanitizer import sanitize
 from support import telemetry
 from support.agent import MODEL
+from support.judge_client import ask_judge
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT / "runs"
+REFUSAL = "Sorry, I can't help with that request."
 BOUND = {"customer_email", "user_email"}  # bound from the session in agent.build_runner (M-5)
 
 
@@ -107,6 +111,55 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
 
     yield {"type": "trace", "turn_id": turn_id, "trace_id": trace_id,
            "url": telemetry.trace_url(trace_id)}
+
+    tracer = trace.get_tracer("support.pipeline")
+
+    def blocked(key: str) -> dict:
+        log["blocked_at"] = key
+        return finish({"type": "final", "blocked": True, "blocked_at": key, "response": REFUSAL,
+                       "terminated": "blocked", "wall_clock_ms": None, "tokens": dict(log["tokens"])})
+
+    # sanitize: in-process, no model call (S-1)
+    yield {"type": "stage", "key": "sanitize", "label": "Sanitizer"}
+    t = time.monotonic()
+    with tracer.start_as_current_span("security.sanitize", attributes={
+        "openinference.span.kind": "GUARDRAIL", "input.value": message,
+    }) as span:
+        is_blocked, reason = sanitize(message)
+        span.set_attribute("output.value", f"{'block' if is_blocked else 'allow'}: {reason}")
+    status = "blocked" if is_blocked else "passed"
+    log["steps"].append({"key": "sanitize", "status": status, "ms": ms_since(t)})
+    yield {"type": "step", "key": "sanitize", "status": status, "detail": reason,
+           "ms": ms_since(t), "span": "security.sanitize", "kind": "Python fn"}
+    if is_blocked:
+        yield blocked("sanitize")
+        return
+
+    # judge: the A2A Security Judge (J-4)
+    yield {"type": "stage", "key": "judge", "label": "A2A Security Judge"}
+    t = time.monotonic()
+    with tracer.start_as_current_span("security.a2a_judge", attributes={
+        "openinference.span.kind": "GUARDRAIL", "input.value": message,
+    }) as span:
+        try:
+            verdict = await ask_judge(message)
+        except Exception as exc:  # fail loud: an error event, never an allow (P-4)
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            log["steps"].append({"key": "judge", "status": "error", "ms": ms_since(t),
+                                 "error": str(exc)})
+            yield finish({"type": "error", "step": "judge", "status": 502, "error": str(exc),
+                          "terminated": "error"})
+            return
+        span.set_attribute("output.value", json.dumps(verdict))
+    status = "blocked" if verdict["verdict"] == "block" else "passed"
+    log["steps"].append({"key": "judge", "status": status, "ms": ms_since(t)})
+    yield {"type": "step", "key": "judge", "status": status,
+           "detail": f"{verdict['verdict']}: {verdict['reason']}", "ms": ms_since(t),
+           "span": "security.a2a_judge", "kind": "A2A"}
+    if status == "blocked":
+        yield blocked("judge")
+        return
 
     yield {"type": "stage", "key": "agent", "label": "Support agent (ADK)"}
     agent_started = last_event = time.monotonic()
