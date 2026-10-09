@@ -99,6 +99,7 @@ Email: bob.smith@techmail.com
 Password: 
 Logged in as Bob Smith.
 You: What is the status of order 5?
+
 /opt/anaconda3/envs/support/lib/python3.12/site-packages/google/adk/models/llm_request.py:306: UserWarning: [EXPERIMENTAL] feature FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled.
   declaration = tool._get_declaration()
 Agent: The status of order #5 is **DELIVERED**. 
@@ -115,9 +116,66 @@ The model change: gemini-2.5-flash returned 404 NOT_FOUND (no longer available t
 
 ## Stage 4: the pipeline and its events 
 - **My hand-sketched CLI lines:**
-- **I predicted the first event after the agent stage would be:**
-- **What happened:**
 
+```
+step     judge → ✓ passed: allow, no injection patterns   (2160 ms)
+tool     get-order-status(order_id=3) [READ]
+         ↩ ok, 1 row (312 ms)
+step     recall → 2 inserted, 1 skipped (0.4s)
+           skipped: "old address…" — 0.21, below cutoff
+step     judge → ✗ BLOCKED: prompt injection   (1800 ms)
+```
+
+- **I predicted the first event after the agent stage would be:** final — mask and save aren't built yet, so nothing sits between the agent finishing and the turn ending.
+- **What happened:**
+```
+echo "What is the status of order 3?" | python -m support.cli --user alice.jones@example.com --events | jq -c '{type, name, key}'
+Password: 
+Logged in as Alice Jones.
+{"type":"trace","name":null,"key":null}
+{"type":"stage","name":null,"key":"agent"}
+{"type":"llm","name":null,"key":null}
+{"type":"tool_call","name":"get-order-status","key":null}
+{"type":"tool_result","name":"get-order-status","key":null}
+{"type":"llm","name":null,"key":null}
+{"type":"step","name":null,"key":"agent"}
+{"type":"final","name":null,"key":null}
+```
+
+I got this one wrong — llm came first, not final. I answered the wrong question: I was thinking about what happens after the agent finishes, but the log asks what comes right after the agent stage starts. And of course it's the model thinking — that's what the agent stage is. The two llm events made sense once I saw them: the first is the model deciding to call get-order-status, the second (after the tool result) is it deciding what to tell the customer. final only shows up after both.
+
+On the model: gemini-3.8-flash started throwing 503s — one turn spun for 119 s before dying — and retrying just slammed into the 429 rate limit. So I moved to gemini-3.5-flash: faster (2.9 s a turn vs 23 s) and it answers instead of erroring, which is why the code and logs say 3.5 now.
+
+```json
+{
+  "turn_id": "turn_f8dc596d16c7469c8e9cf8fc33cb7663",
+  "trace_id": "00000000000000000000000000000000",
+  "user": "alice.jones@example.com",
+  "message": "What is the status of order 3?",
+  "terminated": "done",
+  "blocked_at": null,
+  "wall_clock_ms": 2865,
+  "tokens": {
+    "in": 1552,
+    "out": 92
+  },
+  "steps": [
+    {
+      "key": "agent",
+      "status": "passed",
+      "ms": 2865
+    }
+  ],
+  "tool_calls": [
+    {
+      "name": "get-order-status",
+      "ok": true,
+      "ms": 3
+    }
+  ],
+  "llm_calls": 2
+}
+```
 ## Stage 5: one trace per turn
 - **I decided (what goes in span attributes, who can see Phoenix):**
 - **Trace id:**

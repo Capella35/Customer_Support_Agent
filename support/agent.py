@@ -12,7 +12,8 @@ from google.adk.sessions import InMemorySessionService
 from toolbox_core import ToolboxClient
 
 # The spec names gemini-2.5-flash, but Google no longer serves it to new API keys.
-MODEL = "gemini-3.8-flash"
+# gemini-3.8-flash answered 503 (high demand) on about half the calls in Stage 4.
+MODEL = "gemini-3.5-flash"
 APP_NAME = "customer-support"
 TOOLBOX_URL = os.environ.get("TOOLBOX_URL", "http://127.0.0.1:5000")
 
