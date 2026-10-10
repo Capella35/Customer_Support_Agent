@@ -1,7 +1,6 @@
 """One turn, as a stream of SPEC §7.1 events (P-1). The CLI and the web server only render them.
 
-Steps so far, in P-2 order: sanitize -> judge -> guardrail -> agent. Recall, mask and save
-slot in at their places in later stages. A block ends the turn at once (P-3); a guard that fails
+Steps, in P-2 order: sanitize -> judge -> guardrail -> recall -> agent -> mask -> save. A block ends the turn at once (P-3); a guard that fails
 ends it with an error naming the step, never with an allow (P-4). The whole turn runs inside
 one agent.turn span, so every step's span and ADK's invoke_agent are its children (SPEC §10).
 """
@@ -19,9 +18,9 @@ from opentelemetry.trace import Status, StatusCode
 
 from guards import guardrail
 from guards.sanitizer import sanitize
-from support import telemetry
+from support import memory, telemetry
 from support.agent import MODEL
-from support.judge_client import ask_judge
+from support.guard_clients import ask_judge, ask_masker
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT / "runs"
@@ -189,6 +188,33 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         yield blocked("guardrail", guardrail.REFUSAL)
         return
 
+    # recall: a pipeline step, not a tool; every candidate is listed with its score (R-1, R-5)
+    yield {"type": "stage", "key": "recall", "label": "Memory recall (Mem0)"}
+    t = time.monotonic()
+    with tracer.start_as_current_span("memory.recall", attributes={
+        "openinference.span.kind": "RETRIEVER", "input.value": message,
+    }) as span:
+        try:
+            candidates = await memory.recall(user, message)
+        except Exception as exc:  # fail loud: a broken recall is an error, not "no memories"
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            log["steps"].append({"key": "recall", "status": "error", "ms": ms_since(t),
+                                 "error": str(exc)})
+            yield finish({"type": "error", "step": "recall", "status": 502, "error": str(exc),
+                          "terminated": "error"})
+            return
+        for n, c in enumerate(candidates):
+            span.set_attribute(f"retrieval.documents.{n}.document.content", c["memory"])
+            span.set_attribute(f"retrieval.documents.{n}.document.score", c["score"])
+    inserted = sum(c["inserted"] for c in candidates)
+    log["steps"].append({"key": "recall", "status": "passed", "ms": ms_since(t),
+                         "inserted": inserted, "skipped": len(candidates) - inserted})
+    yield {"type": "step", "key": "recall", "status": "passed",
+           "detail": f"{inserted} inserted, {len(candidates) - inserted} skipped",
+           "ms": ms_since(t), "span": "memory.recall", "kind": "Python fn", "memories": candidates}
+    agent_input = memory.with_memories(message, candidates)
+
     yield {"type": "stage", "key": "agent", "label": "Support agent (ADK)"}
     agent_started = last_event = time.monotonic()
     pending: dict[str, tuple[int, str, float]] = {}  # ADK call id -> (our id, tool name, start)
@@ -196,7 +222,7 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
     try:
         async for event in runner.run_async(
             user_id=user, session_id=session_id,
-            new_message=types.Content(role="user", parts=[types.Part(text=message)]),
+            new_message=types.Content(role="user", parts=[types.Part(text=agent_input)]),
         ):
             calls, responses = event.get_function_calls(), event.get_function_responses()
             # A model response; ADK also emits a content-less event when the model call fails.
@@ -250,7 +276,52 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         "type": "step", "key": "agent", "status": "passed", "ms": took, "kind": "in-process",
         "detail": f"{log['llm_calls']} llm call(s), {calls} tool call(s)", "span": "invoke_agent",
     }
+
+    # mask: the A2A Data Masker sees the reply before the customer does (K-1..K-3)
+    yield {"type": "stage", "key": "mask", "label": "A2A Data Masker"}
+    t = time.monotonic()
+    with tracer.start_as_current_span("security.a2a_mask", attributes={
+        "openinference.span.kind": "GUARDRAIL", "input.value": reply,
+    }) as span:
+        try:
+            masked = await ask_masker(reply, user, message)
+        except Exception as exc:  # fail loud: never send the unmasked reply (P-4)
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            log["steps"].append({"key": "mask", "status": "error", "ms": ms_since(t),
+                                 "error": str(exc)})
+            yield finish({"type": "error", "step": "mask", "status": 502, "error": str(exc),
+                          "terminated": "error"})
+            return
+        span.set_attribute("output.value", masked["masked_text"])
+        span.set_attribute("masker.summary", masked["summary"])
+    log["steps"].append({"key": "mask", "status": "passed", "ms": ms_since(t)})
+    yield {"type": "step", "key": "mask", "status": "passed", "detail": masked["summary"],
+           "ms": ms_since(t), "span": "security.a2a_mask", "kind": "A2A"}
+
+    # save: only the customer's message, only on a turn that was not blocked (R-4, P-3)
+    yield {"type": "stage", "key": "save", "label": "Memory save (Mem0)"}
+    t = time.monotonic()
+    with tracer.start_as_current_span("memory.save", attributes={
+        "openinference.span.kind": "TOOL", "input.value": message,
+    }) as span:
+        try:
+            status = await memory.save(user, message)
+        except Exception as exc:  # fail loud: the turn says the save failed
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            log["steps"].append({"key": "save", "status": "error", "ms": ms_since(t),
+                                 "error": str(exc)})
+            yield finish({"type": "error", "step": "save", "status": 502, "error": str(exc),
+                          "terminated": "error"})
+            return
+        span.set_attribute("output.value", status)
+    log["steps"].append({"key": "save", "status": "passed", "ms": ms_since(t)})
+    yield {"type": "step", "key": "save", "status": "passed",
+           "detail": f"saved your message only ({status})", "ms": ms_since(t),
+           "span": "memory.save", "kind": "Python fn"}
+
     yield finish({
-        "type": "final", "blocked": False, "blocked_at": None, "response": reply,
+        "type": "final", "blocked": False, "blocked_at": None, "response": masked["masked_text"],
         "terminated": "done", "wall_clock_ms": None, "tokens": dict(log["tokens"]),
     })

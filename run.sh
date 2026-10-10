@@ -61,6 +61,12 @@ cmd_judge() {
   exec "$PYTHON" -m guards.judge
 }
 
+# Stage 8: the Data Masker, its own process on :10003 (K-1). No model call, so no quota.
+cmd_masker() {
+  PYTHON="${PYTHON:-$HOME/opt/anaconda3/envs/support/bin/python}"
+  exec "$PYTHON" -m guards.masker
+}
+
 # Stage 3: the bare CLI. Needs the Toolbox running (./run.sh toolbox in another terminal).
 cmd_cli() {
   PYTHON="${PYTHON:-$HOME/opt/anaconda3/envs/support/bin/python}"
@@ -72,6 +78,7 @@ case "${1:-}" in
   toolbox) cmd_toolbox ;;
   phoenix) cmd_phoenix ;;
   judge) cmd_judge ;;
+  masker) cmd_masker ;;
   cli) shift; cmd_cli "$@" ;;
-  *) echo "usage: $0 reset|toolbox|phoenix|judge|cli" >&2; exit 2 ;;
+  *) echo "usage: $0 reset|toolbox|phoenix|judge|masker|cli" >&2; exit 2 ;;
 esac

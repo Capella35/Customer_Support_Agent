@@ -21,7 +21,7 @@ from toolbox_core import ToolboxClient
 
 from support import telemetry
 from support.agent import TOOLBOX_URL, build_runner, login
-from support.judge_client import JUDGE_URL, judge_is_up
+from support.guard_clients import JUDGE_URL, MASKER_URL, judge_is_up, masker_is_up
 from support.pipeline import run_turn
 
 
@@ -50,8 +50,9 @@ def render(event: dict) -> str | None:
             line = (f"step     {event['key']} → {inserted} inserted, {len(mems) - inserted} skipped"
                     f"  ({event['ms']} ms)")
             for m in mems:
-                if not m["inserted"]:
-                    line += f"\n           skipped: \"{m['memory'][:30]}…\" — {m['score']}, {m['reason']}"
+                text = m["memory"] if len(m["memory"]) <= 60 else m["memory"][:60] + "…"
+                status = f"inserted — {m['score']}" if m["inserted"] else f"skipped — {m['reason']}"
+                line += f"\n           {status}: \"{text}\""
         return line
     if kind == "llm":
         return (f"llm      {event['model']} → {event['decision']}"
@@ -90,6 +91,7 @@ async def main() -> None:
     # The pipeline reports a failed turn as an error event; ADK's own tracebacks would bury it.
     logging.getLogger("google_adk").setLevel(logging.CRITICAL)
     warnings.filterwarnings("ignore", message=r"\[EXPERIMENTAL\]")
+    warnings.filterwarnings("ignore", category=DeprecationWarning)  # library noise, not ours
 
     if not toolbox_is_up():
         sys.exit(
@@ -105,6 +107,11 @@ async def main() -> None:
         sys.exit(
             f"The Security Judge is not running at {JUDGE_URL}.\n"
             "Start it in another terminal with: ./run.sh judge"
+        )
+    if not masker_is_up():
+        sys.exit(
+            f"The Data Masker is not running at {MASKER_URL}.\n"
+            "Start it in another terminal with: ./run.sh masker"
         )
     telemetry.setup()  # before any agent is built, so ADK's spans join the turn's trace
     interactive = sys.stdin.isatty()
