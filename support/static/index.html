@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Customer support</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+    --accent: #2f5bd3; --ok: #1f7a46; --bad: #b4232c; --warn: #9a6400; --code: #f1f1ed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --card: #1e1e1c; --ink: #ecece8; --muted: #9a9a93; --line: #33332f;
+      --accent: #7c9cff; --ok: #57c287; --bad: #ff7b82; --warn: #e0a84a; --code: #262624;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  h1 { font-size: 18px; margin: 8px 0 16px; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+           border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  input { font: inherit; width: 100%; padding: 9px 12px; border: 1px solid var(--line);
+          border-radius: 8px; background: var(--card); color: var(--ink); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  #login { max-width: 380px; margin: 40px auto; display: grid; gap: 10px; }
+  .error { color: var(--bad); min-height: 1.5em; }
+  #chat { display: none; }
+  #log { display: grid; gap: 14px; margin-bottom: 14px; }
+  .turn { display: grid; gap: 8px; }
+  .bubble { padding: 10px 14px; border-radius: 12px; max-width: 85%; white-space: pre-wrap;
+            overflow-wrap: anywhere; }
+  .user { justify-self: end; background: var(--accent); color: #fff; }
+  .agent { justify-self: start; background: var(--card); border: 1px solid var(--line); }
+  .agent.blocked { border-color: var(--warn); }
+  .agent.failed { border-color: var(--bad); color: var(--bad); }
+  details.steps { border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+                  font-size: 13px; }
+  details.steps > summary { cursor: pointer; padding: 8px 12px; color: var(--muted); }
+  .rows { padding: 0 12px 10px; display: grid; gap: 6px; }
+  .row { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: start; }
+  .row .meta { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .row .sub { grid-column: 2 / 4; color: var(--muted); overflow-wrap: anywhere; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .pending { color: var(--muted); }
+  .badge { font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px;
+           margin-left: 6px; color: var(--muted); }
+  .badge.write { color: var(--warn); border-color: var(--warn); }
+  pre.sql { grid-column: 2 / 4; margin: 2px 0; background: var(--code); padding: 6px 8px;
+            border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+  .tablewrap { grid-column: 2 / 4; overflow-x: auto; }
+  table { border-collapse: collapse; font-size: 12px; }
+  th, td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
+  th { background: var(--code); }
+  a { color: var(--accent); }
+  form.send { display: flex; gap: 8px; position: sticky; bottom: 0; background: var(--bg);
+              padding: 10px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Customer support</h1><span id="who"></span></header>
+
+  <form id="login" class="card">
+    <strong>Log in</strong>
+    <input id="email" type="email" placeholder="Email" autocomplete="username" required>
+    <input id="password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <button class="primary" type="submit">Log in</button>
+    <div id="loginError" class="error"></div>
+  </form>
+
+  <section id="chat">
+    <div id="log"></div>
+    <form class="send" id="send">
+      <input id="message" placeholder="Ask about your orders, deliveries or returns" autocomplete="off">
+      <button class="primary" id="sendBtn" type="submit">Send</button>
+    </form>
+  </section>
+</main>
+
+<script>
+// Every value from the stream is inserted as text (textContent), never as HTML: attack
+// messages such as <script> come back inside events and must not run here.
+const $ = (id) => document.getElementById(id);
+let userId = null;
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v; else node.setAttribute(k, v);
+  }
+  for (const c of children) node.append(c instanceof Node ? c : document.createTextNode(String(c ?? "")));
+  return node;
+}
+
+// The agent writes light Markdown; show **bold** and keep line breaks, still as text nodes.
+function richText(text) {
+  const frag = document.createDocumentFragment();
+  String(text).split("**").forEach((part, i) => frag.append(i % 2 ? el("strong", {}, part) : part));
+  return frag;
+}
+
+// The tool's SQL with values filled in; a bound parameter shows as bound, not as a value (§7.1).
+function filledSql(info, args) {
+  let sql = info.statement || "";
+  const params = info.params || [];
+  for (let i = params.length; i >= 1; i--) {
+    const name = params[i - 1];
+    let value;
+    if ((info.bound || []).includes(name)) value = `‹${name}: bound from your login›`;
+    else if (name in args) value = typeof args[name] === "string" ? `'${args[name]}'`
+                                   : JSON.stringify(args[name]);
+    else value = `$${i}`;
+    sql = sql.split(`$${i}`).join(value);
+  }
+  return sql;
+}
+
+function cellText(v) {
+  if (v === null || v === undefined) return "";
+  if (Array.isArray(v)) return v.map(x => (x && typeof x === "object")
+    ? Object.entries(x).map(([k, val]) => `${k}: ${val}`).join(", ") : x).join("; ");
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function resultTable(rows) {
+  if (!rows.length) return el("div", { class: "sub" }, "no rows");
+  const cols = [...new Set(rows.flatMap(r => Object.keys(r)))];
+  return el("div", { class: "tablewrap" }, el("table", {},
+    el("tr", {}, ...cols.map(c => el("th", {}, c))),
+    ...rows.map(r => el("tr", {}, ...cols.map(c => el("td", {}, cellText(r[c])))))));
+}
+
+function newTurn(text) {
+  const turn = el("div", { class: "turn" });
+  turn.append(el("div", { class: "bubble user" }, text));
+  const steps = el("details", { class: "steps", open: "" });
+  const summary = el("summary", {}, "Working…");
+  const rows = el("div", { class: "rows" });
+  steps.append(summary, rows);
+  turn.append(steps);
+  $("log").append(turn);
+  return { turn, steps, summary, rows, count: 0, pending: null };
+}
+
+function addRow(t, icon, iconClass, main, meta) {
+  const row = el("div", { class: "row" }, el("span", { class: iconClass }, icon), main, el("span", { class: "meta" }, meta || ""));
+  t.rows.append(row);
+  return row;
+}
+
+function render(t, e) {
+  if (e.type === "trace") {
+    const link = /^https?:\/\/(localhost|127\.0\.0\.1)[:/]/.test(e.url || "")
+      ? el("a", { href: e.url, target: "_blank", rel: "noopener" }, "Open trace in Phoenix") : "trace unavailable";
+    addRow(t, "↗", "pending", el("span", {}, link), e.turn_id);
+  } else if (e.type === "stage") {
+    t.pending = addRow(t, "…", "pending", el("span", {}, e.label), "running");
+  } else if (e.type === "step") {
+    if (t.pending) { t.pending.remove(); t.pending = null; }
+    t.count++;
+    const passed = e.status === "passed";
+    const row = addRow(t, passed ? "✓" : "✗", passed ? "ok" : "bad",
+      el("span", {}, el("strong", {}, e.key), " ", passed ? "passed" : "BLOCKED", e.detail ? ` — ${e.detail}` : ""),
+      `${e.ms} ms`);
+    row.append(el("span", { class: "sub" }, `span ${e.span || "?"} · ${e.kind || ""}`));
+    for (const m of e.memories || []) {
+      row.append(el("span", { class: "sub" },
+        m.inserted ? `inserted (${m.score}): ${m.memory}` : `skipped (${m.reason}): ${m.memory}`));
+    }
+  } else if (e.type === "llm") {
+    addRow(t, "◇", "pending", el("span", {}, `${e.model} → ${e.decision}`),
+      `${e.tokens_in} in / ${e.tokens_out} out · ${e.ms} ms`);
+  } else if (e.type === "tool_call") {
+    const args = Object.entries(e.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
+    const access = (e.info && e.info.access) || "?";
+    const row = addRow(t, "⚙", "pending",
+      el("span", {}, `${e.name}(${args})`, el("span", { class: "badge" + (access === "WRITE" ? " write" : "") }, `${e.info?.kind || ""} ${access}`)),
+      e.span || "");
+    if (e.info && e.info.statement) row.append(el("pre", { class: "sql" }, filledSql(e.info, e.args || {})));
+  } else if (e.type === "tool_result") {
+    const row = addRow(t, e.ok ? "↩" : "✗", e.ok ? "ok" : "bad",
+      el("span", {}, `${e.name} ${e.ok ? `returned ${e.result.length} row${e.result.length === 1 ? "" : "s"}` : `failed: ${e.error}`}`),
+      `${e.ms} ms`);
+    if (e.ok) row.append(resultTable(e.result));
+  } else if (e.type === "final") {
+    const cls = "bubble agent" + (e.blocked ? " blocked" : "");
+    t.turn.append(el("div", { class: cls }, richText(e.response)));
+    finish(t, e.blocked ? `blocked at ${e.blocked_at}` : `${e.wall_clock_ms} ms`);
+  } else if (e.type === "error") {
+    if (t.pending) { t.pending.remove(); t.pending = null; }
+    addRow(t, "✗", "bad", el("span", {}, el("strong", {}, e.step), ` failed — ${e.error}`), "");
+    t.turn.append(el("div", { class: "bubble agent failed" },
+      `Sorry, something went wrong at the ${e.step} step, so I can't answer right now.`));
+    finish(t, `error at ${e.step}`);
+  }
+}
+
+// Open while the turn runs; collapsed into a toggle once it ends (the Stage 9 decision).
+function finish(t, note) {
+  t.summary.textContent = `Show steps (${t.count}) · ${note}`;
+  t.steps.open = false;
+}
+
+async function send(text) {
+  const t = newTurn(text);
+  $("sendBtn").disabled = true;
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ user_id: userId, message: text }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      render(t, { type: "error", step: "request", error: `${resp.status} ${body.error || ""}` });
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (line) render(t, JSON.parse(line));
+      }
+    }
+  } catch (err) {
+    render(t, { type: "error", step: "connection", error: String(err) });
+  } finally {
+    $("sendBtn").disabled = false;
+    $("message").focus();
+  }
+}
+
+$("login").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  $("loginError").textContent = "";
+  const resp = await fetch("/api/login", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: $("email").value, password: $("password").value }),
+  });
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) { $("loginError").textContent = body.error || `Login failed (${resp.status})`; return; }
+  userId = body.user_id;
+  $("password").value = "";
+  $("login").style.display = "none";
+  $("chat").style.display = "block";
+  const out = el("button", { type: "button" }, "Log out");
+  out.addEventListener("click", async () => {
+    await fetch("/api/logout", { method: "POST", headers: { "content-type": "application/json" },
+                                 body: JSON.stringify({ user_id: userId }) });
+    location.reload();
+  });
+  $("who").replaceChildren(`${body.full_name} `, out);
+  $("message").focus();
+});
+
+$("send").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const text = $("message").value;
+  if (!text.trim()) return;
+  $("message").value = "";
+  send(text);
+});
+</script>
+</body>
+</html>

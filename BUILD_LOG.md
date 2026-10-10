@@ -353,8 +353,10 @@ Blocked at sanitize, so no save step ran and nothing was remembered (P-3).
 
 
 ## Stage 9: the web UI
-- **My sketch, in words:**
-- **Something the UI shows that the CLI doesn't (feature or leak?):**
+- **My sketch, in words:** The customer will see the steps in collapsible panels that stay open while the turn runs, so each step arrives live as it happens — status, detail, latency, span name, the tool's SQL, and the trace link (W-3). When the turn finishes, the panels collapse into a "Show steps" toggle, keeping the chat tidy afterwards. Opening a panel mid-turn shows steps still streaming in, so nothing is ever hidden behind a click while the run is live.
+- **Something the UI shows that the CLI doesn't (feature or leak?):**  the UI didn't reveal anything the CLI hid — and that turned out to be the finding. The UI prints each recalled memory's full text inline, and in this turn that includes the raw sam.taylor@example.org from my PII test ("User requested to add colleague sam.taylor@example.org as a delivery contact"). The CLI cuts each memory at 60 characters, but the full email lands inside the first 54, so the CLI's recall line printed it raw too. Neither surface passes recalled memories through the Masker: recall runs before the agent, and the Masker only ever sees the final reply. So the feature-or-leak question isn't UI vs CLI — it's the recall list itself, on every surface. I read it as a feature with a leak's shadow: honest transparency about what the system remembers, and a note to self that recalled text deserves the same masking pass as the reply before it reaches anyone but the customer.
+- G-EVENTS check: I compared the web stream's event types against --events for the same message twice. The first comparison differed because the web session reused an earlier tool result, so the stream had no tool call to match. The second, with fresh sessions on both sides, gave "same event types."
+- XSS sanity check: Running `<script>alert(1)</script>` in the browser UI was blocked at sanitize — the panel showed a single step, no pop-up, no tool calls, just the refusal.
 
 ## Stage 10: the eval runner
 - **How I handled the memory waits:**

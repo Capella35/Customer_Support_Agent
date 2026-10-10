@@ -6,6 +6,7 @@ whether it may reach the agent (R-2, R-5). save() stores the customer's message 
 """
 import os
 
+import httpx
 from mem0 import AsyncMemoryClient
 
 TOP_K = 5             # T-MEM-TOPK
@@ -56,3 +57,14 @@ async def save(user: str, message: str) -> str:
     """Store the customer's message only, never the reply (R-4). Mem0 extracts facts later."""
     result = await _mem0().add([{"role": "user", "content": message}], user_id=user)
     return str(result.get("status", "sent"))
+
+
+async def mem0_ok() -> str:
+    """For /health: Mem0's ping checks the key without reading or writing any memory."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get("https://api.mem0.ai/v1/ping/",
+                                 headers={"Authorization": f"Token {os.environ['MEM0_API_KEY']}"})
+        return "ok" if r.status_code == 200 else f"HTTP {r.status_code}"
+    except (httpx.HTTPError, KeyError) as exc:
+        return f"{type(exc).__name__}: {exc}"

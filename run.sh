@@ -67,6 +67,12 @@ cmd_masker() {
   exec "$PYTHON" -m guards.masker
 }
 
+# Stage 9: the web UI and API on :8000 (W-1).
+cmd_web() {
+  PYTHON="${PYTHON:-$HOME/opt/anaconda3/envs/support/bin/python}"
+  exec "$PYTHON" -m support.web
+}
+
 # Stage 3: the bare CLI. Needs the Toolbox running (./run.sh toolbox in another terminal).
 cmd_cli() {
   PYTHON="${PYTHON:-$HOME/opt/anaconda3/envs/support/bin/python}"
@@ -79,6 +85,7 @@ case "${1:-}" in
   phoenix) cmd_phoenix ;;
   judge) cmd_judge ;;
   masker) cmd_masker ;;
+  web) cmd_web ;;
   cli) shift; cmd_cli "$@" ;;
-  *) echo "usage: $0 reset|toolbox|phoenix|judge|masker|cli" >&2; exit 2 ;;
+  *) echo "usage: $0 reset|toolbox|phoenix|judge|masker|web|cli" >&2; exit 2 ;;
 esac
