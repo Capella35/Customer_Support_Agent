@@ -1,7 +1,7 @@
 """One turn, as a stream of SPEC §7.1 events (P-1). The CLI and the web server only render them.
 
-Steps so far, in P-2 order: sanitize -> judge -> agent. Guardrail, recall, mask and save slot
-in at their places in later stages. A block ends the turn at once (P-3); a guard that fails
+Steps so far, in P-2 order: sanitize -> judge -> guardrail -> agent. Recall, mask and save
+slot in at their places in later stages. A block ends the turn at once (P-3); a guard that fails
 ends it with an error naming the step, never with an allow (P-4). The whole turn runs inside
 one agent.turn span, so every step's span and ADK's invoke_agent are its children (SPEC §10).
 """
@@ -17,6 +17,7 @@ from google.genai import types
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
+from guards import guardrail
 from guards.sanitizer import sanitize
 from support import telemetry
 from support.agent import MODEL
@@ -114,9 +115,9 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
 
     tracer = trace.get_tracer("support.pipeline")
 
-    def blocked(key: str) -> dict:
+    def blocked(key: str, response: str = REFUSAL) -> dict:
         log["blocked_at"] = key
-        return finish({"type": "final", "blocked": True, "blocked_at": key, "response": REFUSAL,
+        return finish({"type": "final", "blocked": True, "blocked_at": key, "response": response,
                        "terminated": "blocked", "wall_clock_ms": None, "tokens": dict(log["tokens"])})
 
     # sanitize: in-process, no model call (S-1)
@@ -161,6 +162,33 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         yield blocked("judge")
         return
 
+    # guardrail: in-process scope check, fresh session per message (GR-1..GR-4)
+    yield {"type": "stage", "key": "guardrail", "label": "Guardrail (scope)"}
+    t = time.monotonic()
+    with tracer.start_as_current_span("guardrail.check", attributes={
+        "openinference.span.kind": "GUARDRAIL", "input.value": message,
+        "guardrail.prompt_version": guardrail.VERSION,
+    }) as span:
+        try:
+            decision = await guardrail.check(message)
+        except Exception as exc:  # fail loud: an unparseable decision is an error, not a pass
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            log["steps"].append({"key": "guardrail", "status": "error", "ms": ms_since(t),
+                                 "error": str(exc)})
+            yield finish({"type": "error", "step": "guardrail", "status": 502,
+                          "error": str(exc), "terminated": "error"})
+            return
+        span.set_attribute("output.value", json.dumps(decision))
+    status = "blocked" if decision["decision"] == "unsafe" else "passed"
+    log["steps"].append({"key": "guardrail", "status": status, "ms": ms_since(t)})
+    yield {"type": "step", "key": "guardrail", "status": status,
+           "detail": f"{decision['decision']}: {decision['reasoning']}", "ms": ms_since(t),
+           "span": "guardrail.check", "kind": "in-process"}
+    if status == "blocked":
+        yield blocked("guardrail", guardrail.REFUSAL)
+        return
+
     yield {"type": "stage", "key": "agent", "label": "Support agent (ADK)"}
     agent_started = last_event = time.monotonic()
     pending: dict[str, tuple[int, str, float]] = {}  # ADK call id -> (our id, tool name, start)
@@ -180,7 +208,7 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
                 log["tokens"]["in"] += tokens_in
                 log["tokens"]["out"] += tokens_out
                 yield {
-                    "type": "llm", "model": MODEL,
+                    "type": "llm", "model": event.model_version or MODEL,  # the model that answered
                     "decision": f"call {calls[0].name}" if calls else "final answer",
                     "tokens_in": tokens_in, "tokens_out": tokens_out,
                     "ms": ms_since(last_event), "span": "call_llm",

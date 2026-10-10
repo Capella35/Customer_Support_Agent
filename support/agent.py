@@ -11,9 +11,12 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from toolbox_core import ToolboxClient
 
+from support import models
+
 # The spec names gemini-2.5-flash, but Google no longer serves it to new API keys.
 # gemini-3.8-flash answered 503 (high demand) on about half the calls in Stage 4.
-MODEL = "gemini-3.5-flash"
+# Since Stage 7 the agent draws from a pool (support/models.py); this is its first choice.
+MODEL = models.AGENT[0]
 APP_NAME = "customer-support"
 TOOLBOX_URL = os.environ.get("TOOLBOX_URL", "http://127.0.0.1:5000")
 
@@ -58,7 +61,8 @@ async def build_runner(client: ToolboxClient, email: str) -> tuple[Runner, str]:
         bound_params={"customer_email": email, "user_email": email},
         strict=False,
     )
-    agent = LlmAgent(name="support_agent", model=MODEL, instruction=INSTRUCTION, tools=tools)
+    agent = LlmAgent(name="support_agent", model=models.pooled(models.AGENT),
+                     instruction=INSTRUCTION, tools=tools)
     sessions = InMemorySessionService()
     session = await sessions.create_session(app_name=APP_NAME, user_id=email)
     return Runner(agent=agent, app_name=APP_NAME, session_service=sessions), session.id

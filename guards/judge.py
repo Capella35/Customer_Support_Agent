@@ -20,7 +20,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from guards.patterns import check_patterns
-from support.agent import MODEL
+from support import models
 
 HOST, PORT = "127.0.0.1", 10002
 APP_NAME = "security-judge"
@@ -43,7 +43,7 @@ Reply with only a JSON object, no other text:
 {"verdict": "allow" or "block", "reason": "<one short sentence>"}
 """
 
-agent = LlmAgent(name="security_judge", model=MODEL, instruction=INSTRUCTION,
+agent = LlmAgent(name="security_judge", model=models.pooled(models.JUDGE), instruction=INSTRUCTION,
                  tools=[check_patterns])
 sessions = InMemorySessionService()
 runner = Runner(agent=agent, app_name=APP_NAME, session_service=sessions)
