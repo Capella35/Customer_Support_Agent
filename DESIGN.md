@@ -55,7 +55,7 @@ Also: the agent's toolset holds only those three tools — nothing that can chan
 
 My .env holds three keys (names only): GOOGLE_API_KEY, MEM0_API_KEY, and TOOLBOX_DB_PASSWORD, referenced in mcp_toolbox/tools.yaml as ${TOOLBOX_DB_PASSWORD}.
 
-- GOOGLE_API_KEY — the pipeline process, for every ADK agent call (support agent, in-process guardrail). The Judge and Masker services use it inside their own processes if they call a model.
+-  GOOGLE_API_KEY is held by the pipeline process for every ADK agent call, and by the Judge in its own process, since the Judge runs an ADK agent (pattern tool plus the model's own reading). The Masker never touches GOOGLE_API_KEY — it doesn't call a model at all; it masks with deterministic patterns, which is also why the mask step finishes in tens of milliseconds.
 - MEM0_API_KEY — the pipeline process, for the recall and save steps.
 - TOOLBOX_DB_PASSWORD — the MCP Toolbox process (:5000), to log in to Postgres as the least-privilege support_toolbox role; and ./run.sh reset, which sets that password on the role (run.sh:29).
 
@@ -78,7 +78,7 @@ The pipeline enforces them, not the model. Per R-2, anything that must happen ev
 | R-5 | Code | Planned: pipeline save step — writes only the user's message, never the agent's reply | Bob's case: the agent trusted its own old refusal over his stated preference. |
 | R-6 | Both | Prompt: the guardrail's ADK prompt with this shop's examples (planned). Code: GR-3's fresh model session per check; GR-4's "unparseable decision is an error" | The scope itself can only live in the prompt — the incident was a copied prompt with the wrong examples. But the contract around it is code. |
 | R-7 | Code | Planned: length check against T-MEM-MAXCHARS before a memory reaches the prompt | The 30,100-char loop — a prompt can't measure characters; code checks len(). |
-| R-8 | Code | Planned: Masker reports exactly what it changed (K-3); pipeline asserts only masked spans differ | The .lower() bug went unnoticed because nothing checked the unchanged part. |
+| R-8 | Code | Built: only matched PII spans are substituted — the PII test reported "masked 1 email address" while the delivery address and everything else came through untouched | The .lower() bug survived because no check covered the text that wasn't supposed to change. |
 | R-9 | Code | Planned: Judge returns an explicit verdict field; anything else is an error, never inferred "safe" | The Judge signaled "safe" by echoing the input unchanged — meaning must never be inferred from an echo. |
 | R-10 | Code (architecture) | Phoenix as a separate process (:6006) with persistent storage | In-process in-memory Phoenix lost every trace across three restarts. |
 | R-11 | Code | db/seed.sql CHECK constraint on actions_log.action_type (verified Stage 1: actions_log_action_type_check rejected RETURN_ITEM) | One afternoon logged the same intent three ways; only the schema stops that. |
@@ -150,9 +150,15 @@ Run logs. Live on disk as runs/<turn_id>.json. They last until deleted — .giti
 
 What happens when a memory goes stale? Alice says "my order 4 is processing," Mem0 saves it, then the order ships. Next week, the database is what's true — the memory is only a snapshot of what she said once. What stops the agent from trusting it: Grounded or nothing — every order fact has to come from a tool call in that turn, which the instruction already says ("Every order fact you state comes from a tool result in this conversation"). The stronger rule — trust tools over memories for order facts — is planned (SPEC R-3, Stage 8): it's not in the instruction today, and recall doesn't exist yet. That's consistent with the Responsibilities table, which honestly marks Grounded or nothing as Prompt (for now). Memories are for things like preferences ("leave packages at the back door"), never for order state. Order state always comes fresh from the database.
 
+The Masker only cleans the reply the customer sees. The raw address is still sitting in five places: the tool-call event in the stream (visible to anyone watching --events or the web UI); the run log, since runs/<turn_id>.json stores the customer's message, email included (readable by anyone with filesystem access); actions_log.parameters in Postgres (readable by whoever holds the database credentials — the agent's own role can only read back id and action_type); the Phoenix trace, which captured the unmasked text in the agent and tool spans before masking (readable by anyone who can reach the Phoenix UI or API on localhost); and Mem0, since only the user's raw message is saved (readable by anyone holding MEM0_API_KEY, plus Mem0 itself). So the Masker is a display-layer guard, not a storage-layer one — it stops the leak the customer would see, not the copies the system keeps.
+
 ## Trade-offs
 
 What did each guard cost you in latency (from your traces), and was it worth it? Did you
 make the Guardrail fail closed, and what does that cost when Gemini is slow? If you changed
 `T-MEM-MINSCORE` or argued against any threshold, give the evidence here, and keep the
 original gate in your report.
+The cutoff change:
+I lowered T-MEM-MINSCORE from 0.25 to 0.20 after a genuine back-door preference scored 0.2487 and was skipped at the original cutoff, while an unrelated memory at 0.1208 was skipped under both. I accept the trade: memories scoring between 0.20 and 0.25 now reach the agent, adding noise and tokens to those prompts — most turns are unaffected, since most memories score nowhere near the boundary. I admit the evidence is weaker than it first looked — the same memory later scored 0.2771, which would have passed at 0.25 too — and I'll keep the original 0.25 gate in the Stage 10 report alongside the 0.20 value in use.
+GR-4's cost:
+When the Guardrail's reply can't be parsed, I end the turn in an error — and honestly, what the customer sees today is the raw error line, something like error guardrail → ✗ unparseable decision: '...', with no friendly message. That's a real cost, and a friendlier error message is something I'd add. I saw no parse failures across the 45 trial runs on the free-tier Lite model, but I accept the risk rises with model flakiness and timeouts. I still prefer this to the reference build, which passed on parse failure: a silent pass lets attacks through unnoticed, while a visible error is measurable, debuggable, and never mistaken for approval.
