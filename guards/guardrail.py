@@ -68,14 +68,18 @@ async def check(message: str) -> dict:
     """Return {"decision", "reasoning"} or raise; there is no default decision."""
     session = await _sessions.create_session(app_name=APP_NAME, user_id="guardrail")
     try:
-        reply, model = "", None
+        reply, model, tokens = "", None, {"in": 0, "out": 0}
         async for event in _runner.run_async(
             user_id="guardrail", session_id=session.id,
             new_message=types.Content(role="user", parts=[types.Part(text=message)]),
         ):
+            if event.usage_metadata:  # counted toward the turn's token budget (T-BUD-TOKENS)
+                tokens["in"] += event.usage_metadata.prompt_token_count or 0
+                tokens["out"] += event.usage_metadata.candidates_token_count or 0
             if event.is_final_response() and event.content and event.content.parts:
                 reply = "".join(p.text or "" for p in event.content.parts)
                 model = event.model_version
     finally:
         await _sessions.delete_session(app_name=APP_NAME, user_id="guardrail", session_id=session.id)
-    return {**parse_decision(reply), "model": model}  # the pool decides which model answers
+    # The pool decides which model answers; tokens count toward the turn's budget.
+    return {**parse_decision(reply), "model": model, "tokens": tokens}

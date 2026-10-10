@@ -1,0 +1,17 @@
+# Gate 0 (EVALS §5): `ruff check` and `mypy` must be clean.
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# The Guardrail prompt is the student's text, one paragraph per line; re-wrapping it would
+# change what the model reads.
+"guards/guardrail.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+files = ["support", "guards", "eval"]

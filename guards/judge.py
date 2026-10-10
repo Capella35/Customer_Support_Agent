@@ -78,18 +78,22 @@ def parse_verdict(text: str) -> dict:
 async def judge(message: str) -> dict:
     found = check_patterns(message)
     if found["match"]:
-        return {"verdict": "block", "reason": f"{found['kind']}: {found['matched']!r}"}
+        return {"verdict": "block", "reason": f"{found['kind']}: {found['matched']!r}",
+                "tokens": {"in": 0, "out": 0}}
     # A fresh session per message, so one verdict cannot colour the next.
     session = await sessions.create_session(app_name=APP_NAME, user_id="judge")
-    reply = ""
+    reply, tokens = "", {"in": 0, "out": 0}
     async for event in runner.run_async(
         user_id="judge", session_id=session.id,
         new_message=types.Content(role="user", parts=[types.Part(text=message)]),
     ):
+        if event.usage_metadata:  # reported so the pipeline can hold T-BUD-TOKENS
+            tokens["in"] += event.usage_metadata.prompt_token_count or 0
+            tokens["out"] += event.usage_metadata.candidates_token_count or 0
         if event.is_final_response() and event.content and event.content.parts:
             reply = "".join(p.text or "" for p in event.content.parts)
     await sessions.delete_session(app_name=APP_NAME, user_id="judge", session_id=session.id)
-    return parse_verdict(reply)
+    return {**parse_verdict(reply), "tokens": tokens}
 
 
 app = FastAPI(title="Security Judge")

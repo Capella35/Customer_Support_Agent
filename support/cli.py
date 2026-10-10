@@ -69,8 +69,10 @@ def render(event: dict) -> str | None:
         return (f"final    {event['terminated']}  ({event['wall_clock_ms']} ms,"
                 f" {event['tokens']['in']} in / {event['tokens']['out']} out)\n"
                 f"Agent: {event['response']}")
-    if kind == "error":
-        return f"error    {event['step']} → ✗ {event['error']}"
+    if kind == "error":  # the reply says the request could not be checked (EVALS §6)
+        return (f"error    {event['step']} → ✗ {event['error']}\n"
+                f"Agent: Sorry, I couldn't check your request at the {event['step']} step, "
+                "so I can't answer it right now.")
     return json.dumps(event)
 
 

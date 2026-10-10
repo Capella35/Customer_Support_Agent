@@ -63,8 +63,9 @@ async def build_runner(client: ToolboxClient, email: str) -> tuple[Runner, str]:
         bound_params={"customer_email": email, "user_email": email},
         strict=False,
     )
+    # ToolboxTool objects are callables; ADK's type hint for `tools` is narrower than what it accepts.
     agent = LlmAgent(name="support_agent", model=models.pooled(models.AGENT),
-                     instruction=INSTRUCTION, tools=tools)
+                     instruction=INSTRUCTION, tools=tools)  # type: ignore[arg-type]
     sessions = InMemorySessionService()
     session = await sessions.create_session(app_name=APP_NAME, user_id=email)
     return Runner(agent=agent, app_name=APP_NAME, session_service=sessions), session.id

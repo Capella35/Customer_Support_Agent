@@ -61,7 +61,8 @@ async def main() -> None:
             with RESULTS.open("a") as f:
                 f.write(json.dumps(done[item["id"]]) + "\n")
             mark = "WRONG" if d["decision"] == SETS[name] else "ok   "
-            print(f"{item['id']}  {mark} {d['decision']:<6} {item['message'][:50]:<50}  [{d['model']}]  {d['reasoning']}")
+            print(f"{item['id']}  {mark} {d['decision']:<6} {item['message'][:50]:<50}  "
+                  f"[{d['model']}]  {d['reasoning']}")
         else:
             continue
         break

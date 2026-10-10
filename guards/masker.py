@@ -94,7 +94,7 @@ async def jsonrpc(request: Request) -> dict:
         return error(-32601, f"method not found: {req.get('method')}", req_id)
     parts = (req.get("params") or {}).get("message", {}).get("parts", [])
     text = "".join(p.get("text", "") for p in parts if p.get("kind") == "text")
-    data = next((p["data"] for p in parts if p.get("kind") == "data"), {})
+    data: dict = next((p["data"] for p in parts if p.get("kind") == "data"), {})
     if not data.get("user_email"):
         return error(-32602, "missing data part with user_email", req_id)
     return {"jsonrpc": "2.0", "id": req_id, "result": {

@@ -1,14 +1,18 @@
 """One turn, as a stream of SPEC §7.1 events (P-1). The CLI and the web server only render them.
 
-Steps, in P-2 order: sanitize -> judge -> guardrail -> recall -> agent -> mask -> save. A block ends the turn at once (P-3); a guard that fails
-ends it with an error naming the step, never with an allow (P-4). The whole turn runs inside
-one agent.turn span, so every step's span and ADK's invoke_agent are its children (SPEC §10).
+Steps, in P-2 order: sanitize -> judge -> guardrail -> recall -> agent -> mask -> save.
+Every turn is bounded by THRESHOLDS' T-BUD-* rows; spending one ends it as cap (P-6). A block
+ends the turn at once (P-3); a guard that fails ends it with an error naming the step, never
+with an allow (P-4). The whole turn runs inside one agent.turn span, so every step's span and
+ADK's invoke_agent are its children (SPEC §10).
 """
+import asyncio
 import json
 import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import yaml
 from google.adk.runners import Runner
@@ -25,6 +29,19 @@ from support.guard_clients import ask_judge, ask_masker
 ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT / "runs"
 REFUSAL = "Sorry, I can't help with that request."
+CAP_REPLY = ("Sorry, this request took more than I'm allowed to spend on one turn, so I stopped "
+             "before answering. Please try again, or ask in a shorter way.")
+
+# P-6: every turn is bounded; the numbers are THRESHOLDS.md's.
+BUDGET_TOOLS = 6         # T-BUD-TOOLS
+BUDGET_TOKENS = 30_000   # T-BUD-TOKENS, all LLM layers (Judge, Guardrail, agent)
+BUDGET_WALL_S = 30       # T-BUD-WALL
+
+
+class BudgetExceeded(Exception):
+    def __init__(self, budget: str, detail: str):
+        super().__init__(f"{budget}: {detail}")
+        self.budget = budget
 BOUND = {"customer_email", "user_email"}  # bound from the session in agent.build_runner (M-5)
 
 
@@ -90,7 +107,7 @@ async def run_turn(runner: Runner, session_id: str, user: str, message: str) -> 
 async def _turn(runner: Runner, session_id: str, user: str, message: str,
                 turn_id: str, trace_id: str) -> AsyncIterator[dict]:
     started = time.monotonic()
-    log = {
+    log: dict[str, Any] = {
         "turn_id": turn_id, "trace_id": trace_id, "user": user, "message": message,
         "terminated": None, "blocked_at": None, "wall_clock_ms": None,
         "tokens": {"in": 0, "out": 0}, "steps": [], "tool_calls": [], "llm_calls": 0,
@@ -119,6 +136,43 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         return finish({"type": "final", "blocked": True, "blocked_at": key, "response": response,
                        "terminated": "blocked", "wall_clock_ms": None, "tokens": dict(log["tokens"])})
 
+    async def within(awaitable):
+        """Run one step inside what is left of the turn's wall-clock budget (T-BUD-WALL)."""
+        try:
+            left = max(started + BUDGET_WALL_S - time.monotonic(), 0.01)
+            return await asyncio.wait_for(awaitable, left)
+        except TimeoutError:
+            raise BudgetExceeded("T-BUD-WALL", f"turn passed {BUDGET_WALL_S} s") from None
+
+    def add_tokens(used: dict | None) -> None:
+        log["tokens"]["in"] += (used or {}).get("in", 0)
+        log["tokens"]["out"] += (used or {}).get("out", 0)
+        if log["tokens"]["in"] + log["tokens"]["out"] > BUDGET_TOKENS:
+            raise BudgetExceeded("T-BUD-TOKENS", f"turn used more than {BUDGET_TOKENS} tokens")
+
+    def stopped(step: str, t: float, exc: Exception, span=None, open_calls=()) -> list[dict]:
+        """End the turn at `step`: a spent budget ends it as cap (P-6), anything else as error (P-4)."""
+        message_ = str(exc).strip() or type(exc).__name__
+        if span is not None:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, message_))
+        events = []
+        for call_id, name, call_started in open_calls:  # §7.3 rule 3: every call gets a result
+            log["tool_calls"].append({"name": name, "ok": False, "ms": ms_since(call_started),
+                                      "error": "cancelled: the turn ended"})
+            events.append({"type": "tool_result", "id": call_id, "name": name, "ok": False,
+                           "ms": ms_since(call_started), "error": "cancelled: the turn ended"})
+        if isinstance(exc, BudgetExceeded):
+            log["steps"].append({"key": step, "status": "cap", "ms": ms_since(t), "budget": exc.budget})
+            events.append(finish({"type": "final", "blocked": False, "blocked_at": None,
+                                  "response": CAP_REPLY, "terminated": "cap", "budget": exc.budget,
+                                  "wall_clock_ms": None, "tokens": dict(log["tokens"])}))
+        else:
+            log["steps"].append({"key": step, "status": "error", "ms": ms_since(t), "error": message_})
+            events.append(finish({"type": "error", "step": step, "status": 502, "error": message_,
+                                  "terminated": "error"}))
+        return events
+
     # sanitize: in-process, no model call (S-1)
     yield {"type": "stage", "key": "sanitize", "label": "Sanitizer"}
     t = time.monotonic()
@@ -142,16 +196,13 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         "openinference.span.kind": "GUARDRAIL", "input.value": message,
     }) as span:
         try:
-            verdict = await ask_judge(message)
+            verdict = await within(ask_judge(message))
+            add_tokens(verdict.get("tokens"))
         except Exception as exc:  # fail loud: an error event, never an allow (P-4)
-            span.record_exception(exc)
-            span.set_status(Status(StatusCode.ERROR, str(exc)))
-            log["steps"].append({"key": "judge", "status": "error", "ms": ms_since(t),
-                                 "error": str(exc)})
-            yield finish({"type": "error", "step": "judge", "status": 502, "error": str(exc),
-                          "terminated": "error"})
+            for e in stopped("judge", t, exc, span):
+                yield e
             return
-        span.set_attribute("output.value", json.dumps(verdict))
+        span.set_attribute("output.value", json.dumps({k: verdict[k] for k in ("verdict", "reason")}))
     status = "blocked" if verdict["verdict"] == "block" else "passed"
     log["steps"].append({"key": "judge", "status": status, "ms": ms_since(t)})
     yield {"type": "step", "key": "judge", "status": status,
@@ -169,16 +220,13 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         "guardrail.prompt_version": guardrail.VERSION,
     }) as span:
         try:
-            decision = await guardrail.check(message)
+            decision = await within(guardrail.check(message))
+            add_tokens(decision.get("tokens"))
         except Exception as exc:  # fail loud: an unparseable decision is an error, not a pass
-            span.record_exception(exc)
-            span.set_status(Status(StatusCode.ERROR, str(exc)))
-            log["steps"].append({"key": "guardrail", "status": "error", "ms": ms_since(t),
-                                 "error": str(exc)})
-            yield finish({"type": "error", "step": "guardrail", "status": 502,
-                          "error": str(exc), "terminated": "error"})
+            for e in stopped("guardrail", t, exc, span):
+                yield e
             return
-        span.set_attribute("output.value", json.dumps(decision))
+        span.set_attribute("output.value", json.dumps({k: decision[k] for k in ("decision", "reasoning")}))
     status = "blocked" if decision["decision"] == "unsafe" else "passed"
     log["steps"].append({"key": "guardrail", "status": status, "ms": ms_since(t)})
     yield {"type": "step", "key": "guardrail", "status": status,
@@ -195,14 +243,10 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         "openinference.span.kind": "RETRIEVER", "input.value": message,
     }) as span:
         try:
-            candidates = await memory.recall(user, message)
+            candidates = await within(memory.recall(user, message))
         except Exception as exc:  # fail loud: a broken recall is an error, not "no memories"
-            span.record_exception(exc)
-            span.set_status(Status(StatusCode.ERROR, str(exc)))
-            log["steps"].append({"key": "recall", "status": "error", "ms": ms_since(t),
-                                 "error": str(exc)})
-            yield finish({"type": "error", "step": "recall", "status": 502, "error": str(exc),
-                          "terminated": "error"})
+            for e in stopped("recall", t, exc, span):
+                yield e
             return
         for n, c in enumerate(candidates):
             span.set_attribute(f"retrieval.documents.{n}.document.content", c["memory"])
@@ -220,61 +264,67 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
     pending: dict[str, tuple[int, str, float]] = {}  # ADK call id -> (our id, tool name, start)
     reply = ""
     try:
-        async for event in runner.run_async(
-            user_id=user, session_id=session_id,
-            new_message=types.Content(role="user", parts=[types.Part(text=agent_input)]),
-        ):
-            calls, responses = event.get_function_calls(), event.get_function_responses()
-            # A model response; ADK also emits a content-less event when the model call fails.
-            if event.author != "user" and event.content and not responses:
-                usage = event.usage_metadata
-                tokens_in = (usage and usage.prompt_token_count) or 0
-                tokens_out = (usage and usage.candidates_token_count) or 0
-                log["llm_calls"] += 1
-                log["tokens"]["in"] += tokens_in
-                log["tokens"]["out"] += tokens_out
-                yield {
-                    "type": "llm", "model": event.model_version or MODEL,  # the model that answered
-                    "decision": f"call {calls[0].name}" if calls else "final answer",
-                    "tokens_in": tokens_in, "tokens_out": tokens_out,
-                    "ms": ms_since(last_event), "span": "call_llm",
-                }
-            for call in calls:
-                call_id = len(log["tool_calls"]) + len(pending) + 1
-                pending[call.id or call.name] = (call_id, call.name, time.monotonic())
-                yield {
-                    "type": "tool_call", "id": call_id, "name": call.name,
-                    "args": {k: _decode(v) for k, v in (call.args or {}).items()},
-                    "info": TOOL_INFO.get(call.name, {"kind": "MCP"}),
-                    "span": f"execute_tool {call.name}",
-                }
-            for response in responses:
-                call_id, name, call_started = pending.pop(response.id or response.name)
-                ok, result = _unwrap(response.response)
-                took = ms_since(call_started)
-                entry = {"name": name, "ok": ok, "ms": took}
-                if not ok:
-                    entry["error"] = result
-                log["tool_calls"].append(entry)
-                yield {"type": "tool_result", "id": call_id, "name": name, "ok": ok, "ms": took,
-                       **({"result": result} if ok else {"error": result})}
-            if event.is_final_response() and event.content and event.content.parts:
-                reply = "".join(p.text or "" for p in event.content.parts)
-            last_event = time.monotonic()
-    except Exception as exc:  # fail loud: the turn ends with an error naming the step (P-4)
-        error = f"{type(exc).__name__}: {exc}"
-        log["steps"].append({"key": "agent", "status": "error", "ms": ms_since(agent_started),
-                             "error": error})
-        yield finish({"type": "error", "step": "agent", "status": 502, "error": error,
-                      "terminated": "error"})
+        async with asyncio.timeout(max(started + BUDGET_WALL_S - time.monotonic(), 0.01)):
+            async for event in runner.run_async(
+                user_id=user, session_id=session_id,
+                new_message=types.Content(role="user", parts=[types.Part(text=agent_input)]),
+            ):
+                calls, responses = event.get_function_calls(), event.get_function_responses()
+                # A model response; ADK also emits a content-less event when the model call fails.
+                if event.author != "user" and event.content and not responses:
+                    usage = event.usage_metadata
+                    tokens_in = (usage and usage.prompt_token_count) or 0
+                    tokens_out = (usage and usage.candidates_token_count) or 0
+                    log["llm_calls"] += 1
+                    add_tokens({"in": tokens_in, "out": tokens_out})
+                    yield {
+                        "type": "llm", "model": event.model_version or MODEL,  # the model that answered
+                        "decision": f"call {calls[0].name}" if calls else "final answer",
+                        "tokens_in": tokens_in, "tokens_out": tokens_out,
+                        "ms": ms_since(last_event), "span": "call_llm",
+                    }
+                for call in calls:
+                    call_name = call.name or "unknown"
+                    call_id = len(log["tool_calls"]) + len(pending) + 1
+                    if call_id > BUDGET_TOOLS:  # refused before it runs
+                        raise BudgetExceeded("T-BUD-TOOLS", f"a turn may make {BUDGET_TOOLS} tool calls")
+                    pending[call.id or call_name] = (call_id, call_name, time.monotonic())
+                    yield {
+                        "type": "tool_call", "id": call_id, "name": call_name,
+                        "args": {k: _decode(v) for k, v in (call.args or {}).items()},
+                        "info": TOOL_INFO.get(call_name, {"kind": "MCP"}),
+                        "span": f"execute_tool {call_name}",
+                    }
+                for response in responses:
+                    call_id, name, call_started = pending.pop(response.id or response.name or "unknown")
+                    ok, result = _unwrap(response.response)
+                    took = ms_since(call_started)
+                    entry = {"name": name, "ok": ok, "ms": took}
+                    if not ok:
+                        entry["error"] = result
+                    log["tool_calls"].append(entry)
+                    yield {"type": "tool_result", "id": call_id, "name": name, "ok": ok, "ms": took,
+                           **({"result": result} if ok else {"error": result})}
+                if event.is_final_response() and event.content and event.content.parts:
+                    reply = "".join(p.text or "" for p in event.content.parts)
+                last_event = time.monotonic()
+    except TimeoutError:
+        for e in stopped("agent", agent_started,
+                         BudgetExceeded("T-BUD-WALL", f"turn passed {BUDGET_WALL_S} s"),
+                         open_calls=pending.values()):
+            yield e
+        return
+    except Exception as exc:  # a spent budget ends as cap, anything else as error (P-4, P-6)
+        for e in stopped("agent", agent_started, exc, open_calls=pending.values()):
+            yield e
         return
 
     took = ms_since(agent_started)
     log["steps"].append({"key": "agent", "status": "passed", "ms": took})
-    calls = len(log["tool_calls"])
+    n_calls = len(log["tool_calls"])
     yield {
         "type": "step", "key": "agent", "status": "passed", "ms": took, "kind": "in-process",
-        "detail": f"{log['llm_calls']} llm call(s), {calls} tool call(s)", "span": "invoke_agent",
+        "detail": f"{log['llm_calls']} llm call(s), {n_calls} tool call(s)", "span": "invoke_agent",
     }
 
     # mask: the A2A Data Masker sees the reply before the customer does (K-1..K-3)
@@ -284,14 +334,10 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         "openinference.span.kind": "GUARDRAIL", "input.value": reply,
     }) as span:
         try:
-            masked = await ask_masker(reply, user, message)
+            masked = await within(ask_masker(reply, user, message))
         except Exception as exc:  # fail loud: never send the unmasked reply (P-4)
-            span.record_exception(exc)
-            span.set_status(Status(StatusCode.ERROR, str(exc)))
-            log["steps"].append({"key": "mask", "status": "error", "ms": ms_since(t),
-                                 "error": str(exc)})
-            yield finish({"type": "error", "step": "mask", "status": 502, "error": str(exc),
-                          "terminated": "error"})
+            for e in stopped("mask", t, exc, span):
+                yield e
             return
         span.set_attribute("output.value", masked["masked_text"])
         span.set_attribute("masker.summary", masked["summary"])
@@ -306,14 +352,10 @@ async def _turn(runner: Runner, session_id: str, user: str, message: str,
         "openinference.span.kind": "TOOL", "input.value": message,
     }) as span:
         try:
-            status = await memory.save(user, message)
+            status = await within(memory.save(user, message))
         except Exception as exc:  # fail loud: the turn says the save failed
-            span.record_exception(exc)
-            span.set_status(Status(StatusCode.ERROR, str(exc)))
-            log["steps"].append({"key": "save", "status": "error", "ms": ms_since(t),
-                                 "error": str(exc)})
-            yield finish({"type": "error", "step": "save", "status": 502, "error": str(exc),
-                          "terminated": "error"})
+            for e in stopped("save", t, exc, span):
+                yield e
             return
         span.set_attribute("output.value", status)
     log["steps"].append({"key": "save", "status": "passed", "ms": ms_since(t)})
