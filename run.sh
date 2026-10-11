@@ -79,6 +79,28 @@ cmd_cli() {
   exec "$PYTHON" -m support.cli "$@"
 }
 
+# Definition of Done line 1: one line per service. Each is checked directly, so a service
+# shows as down even when the web server (and its /health) is the thing that is down.
+cmd_status() {
+  local down=0
+  check() {  # name, then a command that succeeds when the service is up
+    local name="$1"; shift
+    if "$@" >/dev/null 2>&1; then printf '  %-9s up\n' "$name"
+    else printf '  %-9s DOWN\n' "$name"; down=1; fi
+  }
+  http_ok() { [[ "$(curl -s -o /dev/null -m 3 -w '%{http_code}' "$1")" == 200 ]]; }
+  check postgres "$PG_BIN/pg_isready" -q
+  # The auth toolset by name: macOS AirPlay also listens on :5000 and answers 403.
+  check toolbox http_ok http://127.0.0.1:5000/api/toolset/auth
+  check phoenix http_ok http://127.0.0.1:6006/
+  check judge   http_ok http://127.0.0.1:10002/.well-known/agent-card.json
+  check masker  http_ok http://127.0.0.1:10003/.well-known/agent-card.json
+  check web     http_ok http://127.0.0.1:8000/health
+  # Mem0 is a cloud service; the web server's /health pings it with the key from .env.
+  check mem0 bash -c 'curl -s -m 15 http://127.0.0.1:8000/health | grep -q "\"mem0\": *\"ok\""'
+  return "$down"
+}
+
 case "${1:-}" in
   reset) cmd_reset ;;
   toolbox) cmd_toolbox ;;
@@ -87,5 +109,6 @@ case "${1:-}" in
   masker) cmd_masker ;;
   web) cmd_web ;;
   cli) shift; cmd_cli "$@" ;;
-  *) echo "usage: $0 reset|toolbox|phoenix|judge|masker|web|cli" >&2; exit 2 ;;
+  status) cmd_status ;;
+  *) echo "usage: $0 reset|status|toolbox|phoenix|judge|masker|web|cli" >&2; exit 2 ;;
 esac

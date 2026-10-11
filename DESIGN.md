@@ -158,8 +158,32 @@ What did each guard cost you in latency (from your traces), and was it worth it?
 make the Guardrail fail closed, and what does that cost when Gemini is slow? If you changed
 `T-MEM-MINSCORE` or argued against any threshold, give the evidence here, and keep the
 original gate in your report.
+What each guard cost. I didn't pull these timings from Phoenix. The eval runner saved every turn's events to reports/progress.jsonl, and each step event carries its own millisecond timer — the table below is the median, p95 and max of those timers across the report's 125 turns.
+
+| Step | n | Median | p95 | Max |
+|---|---|---|---|---|
+| sanitize | 125 | 0 ms | 0 ms | 1 ms |
+| judge | 121 | 1 578 ms | 4 827 ms | 12 704 ms |
+| guardrail | 89 | 618 ms | 782 ms | 837 ms |
+| recall | 74 | 408 ms | 612 ms | 714 ms |
+| agent (for comparison) | 74 | 1 326 ms | 7 553 ms | 8 768 ms |
+| mask | 74 | 34 ms | 62 ms | 101 ms |
+| save | 74 | 288 ms | 401 ms | 605 ms |
+
+Read the n column as a story: all 125 turns reached sanitize; 4 attacks stopped there, 32 more at the judge (26 attacks, 5 cross-customer probes, 1 over-broad legit ask), and 15 off-topic turns at the guardrail — 74 turns ran the full pipeline. The judge row blends instant pattern blocks with full model calls, and the recall row blends the first run's plain search with the redo's reranked one — so treat the medians as pipeline-level, not lab-grade. Each step's timer wraps its span: the slowest Judge turn is trace c9d30b77f5d147e459802e03d7c6a47f, where the step event recorded 12,704 ms and the security.a2a_judge span in Phoenix shows 12.7 s — the two agree.
+
+Was it worth it:
+
+The judge is the slowest median in the pipeline — slower even than the agent step it exists to protect (1 578 ms vs 1 326 ms). It earned the top slot: 26 of the 30 attacks were blocked at the judge, with T-ATTACK-BLOCK at 30/30. I'd rather pay the slower median than let one crafted message through to the tools.
+
+The sanitizer costs nothing measurable — 0 ms median — and it caught 4 attacks before the judge ever ran. That's the whole argument for cheap deterministic checks first: known patterns never have to wake the model.
+
+The masker is 34 ms, cheap — but it only cleans the reply. My State section already admits the raw PII survives in five other places. 34 ms is a fair price for a clean final answer; it isn't PII protection, and I don't claim it is.
+
 The cutoff change:
-I dropped 0.20 because plain-search scores couldn't be cut at all: a right memory scored 0.1731 while a wrong one scored 0.2758, so every possible cutoff let something wrong through or blocked something right. I turned on reranked recall instead, and the rerank scores separated cleanly — the lowest right memory came in at 0.5471 (M07's gift-wrapping preference) against a highest wrong of 0.4153 (M04's strongest wrong match). I set the cutoff at 0.48, roughly the midpoint, leaving about the same headroom on each side (0.065 and 0.067) — centered on purpose, because I'd already watched one memory drift from 0.2487 to 0.2771 between runs, and hugging either edge would invite a flip. The 0.48 itself came from no run; it's the value I chose.
-The costs, since this is Trade-offs: reranking adds about 50 ms per search; M09 shows a related-but-wrong memory can still clear the bar (its plant turn hit the cap, so no right memory existed to compete, and the wrong one scored 0.5679); I picked the cutoff from the same 10 pairs the rerun will score, so that rerun confirms the choice rather than testing it independently; and a clearing bug left extra wrong memories in the measurement.
+The 0.20 came from Stage 8: the genuine preference scored 0.2487, then 0.2771 on a fresh ask, against 0.1208 for an unrelated memory — so I moved the declared 0.25 down to 0.20 temporarily. Then plain-search scores proved they couldn't be cut at any value: a right memory scored 0.1731 while a wrong one scored 0.2758, so every possible cutoff let something wrong through or blocked something right. I dropped 0.20 and turned on reranked recall instead. The rerank scores separated — the lowest right memory came in at 0.5471 against a highest wrong of 0.4153 — with one exception I'm not hiding: one wrong memory scored 0.5679, above my lowest right score, but its pair's plant turn hit the time cap, so the right memory was never saved and there was nothing correct for it to compete against. I set the cutoff at 0.48, roughly the midpoint, leaving about the same headroom on each side (0.065 and 0.067) — centered on purpose, because I'd already watched one memory drift from 0.2487 to 0.2771 between runs, and hugging either edge would invite a flip. The 0.48 itself came from no run; it's the value I chose. The report keeps 0.25 as the declared original gate; this note is the evidence for the changed value.
+
+What it cost: reranking adds about 50 ms per search; one wrong-but-plausible memory cleared the bar as described above; I picked the cutoff from the same 10 pairs the rerun scores, so that rerun can only show the choice survives the data it came from — it can't validate it; and a clearing bug left extra wrong memories in the measurement.
+
 GR-4's cost:
-When the Guardrail's reply can't be parsed, I end the turn in an error — and honestly, what the customer sees today is the raw error line, something like error guardrail → ✗ unparseable decision: '...', with no friendly message. That's a real cost, and a friendlier error message is something I'd add. I saw no parse failures across the 45 trial runs on the free-tier Lite model, but I accept the risk rises with model flakiness and timeouts. I still prefer this to the reference build, which passed on parse failure: a silent pass lets attacks through unnoticed, while a visible error is measurable, debuggable, and never mistaken for approval.
+When the Guardrail's reply can't be parsed, I end the turn in an error — and honestly, what the customer sees today is the raw error line, something like error guardrail → ✗ unparseable decision: '...', with no friendly message. That's a real cost, and a friendlier error message is something I'd add. I saw no parse failures across the 45 trial runs on the free-tier Lite model, but I accept the risk rises with model flakiness and timeouts. I still prefer this to the reference build, which passed on parse failure: a silent pass lets attacks through unnoticed, while a visible error is measurable, debuggable, and never mistaken for approval. Failing closed has a second cost: time. The judge's slowest call took 12.7 s (trace c9d30b77f5d147e459802e03d7c6a47f) — pure guard cost, paid by the customer in waiting. The M09 plant turn teaches the related lesson: its guards took about 5 s (judge 4.2 s, guardrail 0.6 s, recall 0.3 s) and then the agent's model call burned the remaining ~25 s until the 30 s wall cut it off. On the free tier, every slow guard shrinks the budget left for the agent.
