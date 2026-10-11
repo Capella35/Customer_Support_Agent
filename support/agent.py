@@ -5,10 +5,13 @@ sees order_id / action_type / parameters and nothing else. Ownership itself is i
 """
 import json
 import os
+from typing import Any
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.context import Context
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.adk.tools.base_tool import BaseTool
 from toolbox_core import ToolboxClient
 
 from support import models
@@ -54,6 +57,50 @@ async def login(client: ToolboxClient, email: str, password: str) -> dict | None
     return result
 
 
+LOOKUPS = {"get-order-status", "find-customer-orders"}  # their SQL returns only the user's rows
+REFUSED = "refused by the pipeline"
+
+
+def _order_id(value: Any) -> str | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    found = value.get("order_id") if isinstance(value, dict) else None
+    return None if found is None else str(found)
+
+
+class OwnershipCheck:
+    """action-log may name only an order a lookup returned in this turn (the student's Stage 10 fix).
+
+    The SQL check (M-8) already stops the write; this stops the call from reaching the tool,
+    because EVALS §3.4 counts an action-log call naming someone else's order as a leak.
+    """
+
+    def __init__(self) -> None:
+        self.seen: dict[str, set[str]] = {}  # invocation (one turn) -> order ids returned to it
+
+    def after(self, tool: BaseTool, args: dict, ctx: Context, response: Any) -> None:
+        if tool.name in LOOKUPS:
+            rows = response.get("result") if isinstance(response, dict) else response
+            rows = json.loads(rows) if isinstance(rows, str) else rows
+            rows = rows if isinstance(rows, list) else [rows]
+            ids = {_order_id(r) for r in rows} - {None}
+            self.seen.setdefault(ctx.invocation_id, set()).update(i for i in ids if i)
+        return None
+
+    def before(self, tool: BaseTool, args: dict, ctx: Context) -> dict | None:
+        if tool.name != "action-log":
+            return None
+        order = _order_id(args.get("parameters"))
+        if order is None or order in self.seen.get(ctx.invocation_id, set()):
+            return None
+        return {"error": f"{REFUSED}: order {order} was not returned by get-order-status or "
+                         "find-customer-orders in this turn. Look it up first; if the lookup "
+                         "returns nothing, it is not on this customer's account."}
+
+
 async def build_runner(client: ToolboxClient, email: str) -> tuple[Runner, str]:
     """Load the agent's toolset with the session email bound, and open one session."""
     # Both names are bound: the read tools call it customer_email, action-log user_email.
@@ -64,8 +111,10 @@ async def build_runner(client: ToolboxClient, email: str) -> tuple[Runner, str]:
         strict=False,
     )
     # ToolboxTool objects are callables; ADK's type hint for `tools` is narrower than what it accepts.
+    check = OwnershipCheck()
     agent = LlmAgent(name="support_agent", model=models.pooled(models.AGENT),
-                     instruction=INSTRUCTION, tools=tools)  # type: ignore[arg-type]
+                     instruction=INSTRUCTION, tools=tools,  # type: ignore[arg-type]
+                     before_tool_callback=check.before, after_tool_callback=check.after)
     sessions = InMemorySessionService()
     session = await sessions.create_session(app_name=APP_NAME, user_id=email)
     return Runner(agent=agent, app_name=APP_NAME, session_service=sessions), session.id

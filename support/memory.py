@@ -10,10 +10,12 @@ import httpx
 from mem0 import AsyncMemoryClient
 
 TOP_K = 5             # T-MEM-TOPK
-# T-MEM-MINSCORE is 0.25. Lowered to 0.20 (the student's Stage 8 decision, with evidence in
-# BUILD_LOG): diana's planted "back door" preference scored 0.2487 on the question that needed
-# it, while the unrelated "works from home" scored 0.1208. Reports keep the original 0.25 gate.
-MIN_SCORE = 0.20
+# T-MEM-MINSCORE is 0.25. Stage 8 lowered it to 0.20; Stage 10's eval showed plain scores
+# overlap (right memories as low as 0.1731, wrong ones up to 0.2758), so no cutoff separates
+# them. With Mem0's rerank, eval/measure_recall.py gave right >= 0.5471 and wrong <= 0.4153
+# (one related delivery note at 0.5679). 0.48 is the student's Stage 10 choice from that gap.
+MIN_SCORE = 0.48
+RERANK = True
 MAX_CHARS = 500       # T-MEM-MAXCHARS
 HEADER = "Relevant memories about this customer (from Mem0):"  # R-3
 
@@ -29,7 +31,7 @@ def _mem0() -> AsyncMemoryClient:
 
 async def recall(user: str, message: str) -> list[dict]:
     """Every candidate with its score, whether it was inserted, and why not (R-5)."""
-    found = await _mem0().search(message, filters={"user_id": user}, top_k=TOP_K)
+    found = await _mem0().search(message, filters={"user_id": user}, top_k=TOP_K, rerank=RERANK)
     candidates = []
     for m in found.get("results", []):
         text, score = m.get("memory") or "", float(m.get("score") or 0.0)

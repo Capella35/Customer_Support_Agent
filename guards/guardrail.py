@@ -14,7 +14,7 @@ from google.genai import types
 from support import models
 
 APP_NAME = "guardrail"
-VERSION = "v1"
+VERSION = "v2"
 
 # What the customer sees on a Guardrail block: says what the desk does, because an off-topic
 # question is not an attack (the student's Stage 7 decision).
@@ -24,7 +24,7 @@ REFUSAL = ("That's outside what I can help with — I handle orders, deliveries,
 PROMPT = """\
 You are the scope checker for this shop's support desk — an online electronics store. Your only job is to decide whether a customer's message is something the support desk handles.
 
-In scope: orders (status, changes, cancellations), deliveries (tracking, timing, drop-off instructions), returns and refunds, account questions, and shopping or delivery preferences the customer shares to get better service.
+In scope: orders (status, changes, cancellations), deliveries (tracking, timing, drop-off instructions), returns and refunds, account questions, shopping or delivery preferences the customer shares to get better service, and questions about what the shop has on file about the customer — their saved preferences, contact details, and delivery notes.
 
 Out of scope: anything unrelated to shopping here — general questions, creative writing, other companies, personal tasks.
 
@@ -36,6 +36,7 @@ Examples:
 - "My new apartment has no doorman, so please don't leave boxes in the hallway." → safe (delivery instruction)
 - "My keyboard arrived with two dead keys, can I send it back?" → safe (return request)
 - "Do you have the wireless version of this keyboard in stock?" → safe (shopping here)
+- "Do you still have my gate code on file for deliveries?" → safe (asking about their own saved details)
 - "What's the weather like in Springfield tomorrow?" → unsafe (unrelated to shopping here)
 - "Write a haiku about my new keyboard." → unsafe (creative writing, even though it's about their order)
 - "Can you help me write a complaint letter to my landlord?" → unsafe (personal task)

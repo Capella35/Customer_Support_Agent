@@ -1,15 +1,17 @@
 """Model pool for Gemini's free tier: 20 requests per model per day (seen 2026-10-09).
 
-Each layer lists models in order of preference. A call that gets 429 (quota used up) marks that
-model exhausted for the rest of this process and moves to the next; a 503 (overloaded) moves on
-without marking. Only when every model fails does the call raise, and the pipeline then ends the
-turn with an error (P-4), never a silent pass. Built-in retries are off: they hid a 119 s wait
+Each layer lists models in order of preference. A call that gets 429 moves to the next model and
+rests the one that refused: for a minute if it was the per-minute limit, for the rest of this
+process if it was the per-day limit. A 503 (overloaded) moves on without resting it. Only
+when every model fails does the call raise, and the pipeline then ends the turn with an error
+(P-4), never a silent pass. Built-in retries are off: they hid a 119 s wait
 behind one 503 in Stage 4, and the next model in the list is a better retry.
 
 The names map to five separate daily quotas: gemini-3.5-flash is served as gemini-3.6-flash and
 gemini-3.7-flash as gemini-3.8-flash. Strong models come first for the support agent; the
 guards start on the Lite models so the agent's quota lasts longer.
 """
+import time
 from collections.abc import AsyncGenerator
 
 from google.adk.models.google_llm import Gemini
@@ -25,7 +27,8 @@ GUARDRAIL = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3-flash-p
 JUDGE = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3-flash-preview",
          "gemini-3.7-flash", "gemini-3.5-flash"]
 
-_exhausted: set[str] = set()  # shared by every layer in this process: the quota is per model
+_resting: dict[str, float] = {}  # model -> monotonic time it may be tried again; quota is per model
+DAY = float("inf")
 
 
 class PooledGemini(Gemini):
@@ -36,7 +39,7 @@ class PooledGemini(Gemini):
     ) -> AsyncGenerator[LlmResponse, None]:
         failures = []
         for name in [self.model, *self.fallbacks]:
-            if name in _exhausted:
+            if _resting.get(name, 0.0) > time.monotonic():
                 continue
             llm_request.model = name
             try:
@@ -46,11 +49,12 @@ class PooledGemini(Gemini):
             except ClientError as exc:
                 if exc.code != 429:
                     raise
-                _exhausted.add(name)
-                failures.append(f"{name}: 429 quota")
+                per_day = "PerDay" in str(exc)
+                _resting[name] = DAY if per_day else time.monotonic() + 60
+                failures.append(f"{name}: 429 {'daily' if per_day else 'per-minute'} quota")
             except ServerError as exc:
                 failures.append(f"{name}: {exc.code}")
-        raise RuntimeError("every model in the pool failed: " + "; ".join(failures or ["all exhausted"]))
+        raise RuntimeError("every model in the pool failed: " + "; ".join(failures or ["all resting"]))
 
 
 def pooled(order: list[str]) -> PooledGemini:
