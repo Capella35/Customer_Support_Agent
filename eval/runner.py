@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,28 @@ def gate_trajectory() -> bool:
     return say("3 TRAJECTORY", not problems, "; ".join(problems[:5]) or "all run logs clean")
 
 
+def print_turns(results: list[dict], driven: int) -> None:
+    """Per set: how its saved turns ended. On a resume most were driven by an earlier invocation."""
+    print(f"\nturns: {len(results)} saved, {driven} driven by this invocation"
+          + ("" if driven == len(results) else " (the rest from saved progress, reports/progress.jsonl)"))
+    by_set: dict[str, Counter] = {}
+    for r in results:
+        name = r["set"] + (f" {r['phase']}" if r.get("phase") else "")
+        by_set.setdefault(name, Counter())[score.terminated(r)] += 1
+    for name, ends in by_set.items():
+        tally = ", ".join(f"{k} {v}" for k, v in sorted(ends.items()))
+        print(f"  {name:<14} {sum(ends.values()):>3}  {tally}")
+
+
+def print_rows(metrics: dict) -> None:
+    """Every T-* row as the report holds it, so the console shows what gate 4 judged."""
+    print()
+    for name, row in metrics.items():
+        print(f"  {'PASS' if row['pass'] else 'FAIL'} {name:<20} {row['value']!s:<8} "
+              f"(target {row['target']}, n={row['n']})")
+    print()
+
+
 def red_lines(metrics: dict, results: list[dict]) -> dict:
     tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.split()
     secret = any(
@@ -164,6 +187,7 @@ async def main() -> int:
         return 2
 
     complete = True
+    before = len(drive.load_progress()[1])
     try:
         await drive.drive(fresh=False)
     except drive.QuotaExhausted as exc:
@@ -197,6 +221,9 @@ async def main() -> int:
         },
     }
     score.dump(REPORT, report)
+
+    print_turns(results, driven=len(results) - before)
+    print_rows(metrics)
 
     failed_rows = [k for k, v in metrics.items() if not v["pass"]]
     eval_ok = complete and not failed_rows and not any(report["red_lines"].values())
